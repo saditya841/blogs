@@ -1,4 +1,4 @@
-// Step 4: image (free licensed photo -> AI thumbnail) + video (YouTube) for a post. Never throws: a post never fails because of media.
+// Step 4: image (free licensed photo -> AI illustration) + video (YouTube) for a post. Never throws: a post never fails because of media.
 const UA = { 'User-Agent': 'VirallBot/1.0 (https://virall.in; pcssupp77@gmail.com)', Accept: 'application/json' };
 const now = () => Math.floor(Date.now() / 1000);
 const strip = (h) => String(h || '').replace(/<[^>]+>/g, ' ').replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#0?39;/g, "'").replace(/\s+/g, ' ').trim();
@@ -35,18 +35,18 @@ export async function findPhoto(query) {
   return null;
 }
 
-// ---- 2) AI thumbnail (Workers AI, no key). Symbolic art only: never real people or faces. Stored in D1, served at /img/<id>.jpg ----
+// ---- 2) AI illustration (Workers AI, no key). Symbolic art only: never real people or faces. Stored in D1, served at /img/<id>.jpg ----
 export async function aiIllustration(env, query) {
   const subject = String(query || '').replace(/["']/g, '').slice(0, 80);
   if (!subject) return null;
-  const prompt = `Editorial thumbnail for a news article about: ${subject}. Modern flat vector style, symbolic scene, soft colors, no text, no letters, no logos, no real people, no faces.`;
+  const prompt = `Editorial illustration for a news article about: ${subject}. Modern flat vector style, symbolic scene, soft colors, no text, no letters, no logos, no real people, no faces.`;
   const r = await env.AI.run('@cf/black-forest-labs/flux-1-schnell', { prompt, steps: 4 });
   const b64 = r && (r.image || (r.result && r.result.image));
   if (!b64 || typeof b64 !== 'string') return null;
   await env.DB.prepare('CREATE TABLE IF NOT EXISTS images (id TEXT PRIMARY KEY, mime TEXT, b64 TEXT, created_at INTEGER)').run();
   const id = Math.random().toString(36).slice(2, 8) + Math.random().toString(36).slice(2, 8);
   await env.DB.prepare('INSERT INTO images(id,mime,b64,created_at) VALUES(?,?,?,?)').bind(id, 'image/jpeg', b64, now()).run();
-  return { url: `${env.SITE_URL}/img/${id}.jpg`, credit: 'AI-generated thumbnail' };
+  return { url: `${env.SITE_URL}/img/${id}.jpg`, credit: 'AI-generated illustration' };
 }
 
 // ---- 3) YouTube video (needs a free YouTube Data API key in the secret YOUTUBE_API_KEY) ----
@@ -73,7 +73,7 @@ export async function findVideo(env, query) {
 }
 
 // Fills image + video of one post. o = { query, tags[], force }. Returns short notes for the admin.
-// Image order: licensed photo -> thumbnail of the matching YouTube video -> AI thumbnail -> (site shows a poster)
+// Image order: licensed photo -> thumbnail of the matching YouTube video -> AI illustration -> (site shows a poster)
 const ytId = (u) => { const m = String(u || '').match(/(?:youtu\.be\/|v=|embed\/)([\w-]{11})/); return m ? m[1] : null; };
 export async function addMedia(env, postId, o = {}) {
   const out = { image: '', video: '' };
