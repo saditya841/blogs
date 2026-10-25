@@ -30,9 +30,9 @@ AUTO_APPROVE_MIN_SCORE = "95"
 # Is se kam shabdon ke post par ads nahi dikhenge (thin content se bachav)
 MIN_WORDS_FOR_ADS = "600"
 # Roz kitne naye trending topics (6 = roz 6 topics)
-DAILY_TOPIC_LIMIT = "6"
+DAILY_TOPIC_LIMIT = "10"
 # Roz max kitne naye drafts
-DAILY_POST_LIMIT = "2"
+DAILY_POST_LIMIT = "4"
 # Post ki bhasha: hi ya en
 POST_LANG = "hi"
 TRENDS_GEO = "IN"
