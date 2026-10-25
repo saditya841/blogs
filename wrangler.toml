@@ -11,19 +11,19 @@ binding = "AI"
 [[d1_databases]]
 binding = "DB"
 database_name = "virall-db"
-database_id = "22107ebf-a597-4d4a-b2bf-70c25e72e37b"
+database_id = "3e20e9da-4c1b-422c-bdd4-16dc63b9ceca"
 
 [vars]
 SITE_URL = "https://virall.in"
 SITE_NAME = "Virall"
 SITE_TAGLINE = "Trending khabrein, saaf aur sourced"
 AUTHOR_NAME = "Virall Desk"
-CONTACT_EMAIL = "pcssupp77@gmail.com"
+CONTACT_EMAIL = "saditya841@gmail.com"
 # AdSense approve hone ke baad: pub-XXXXXXXXXXXXXXXX aur ad unit slot ID bharo
 ADSENSE_PUB = ""
 ADSENSE_SLOT = ""
 # IndexNow (Bing/Yandex ko turant batata hai). Koi bhi 16-32 random letters/numbers likho
-INDEXNOW_KEY = "k8x2m9q4v7b1n6c3z5a1"
+INDEXNOW_KEY = "k8x2m9q4v7b1n6c3z5b1"
 # AI auto-publish (admin page ka switch ON ho tab): itne ghante draft par koi action na ho aur score itna ya zyada ho to live. Switch default OFF hai.
 AUTO_APPROVE_HOURS = "2"
 AUTO_APPROVE_MIN_SCORE = "95"
