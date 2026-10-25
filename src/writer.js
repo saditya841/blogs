@@ -3,6 +3,7 @@ import { runAI, modelList } from './ai.js';
 import { JUNK } from './trends.js';
 import { addMedia } from './media.js';
 import { groundedCheck as strictGroundedCheck, numbersNotIn, latinNotIn, expectedClaims } from './verify.js';
+import { preflight, postflight } from './playbook.js';
 const now = () => Math.floor(Date.now() / 1000);
 const CATS = ['India', 'Odisha', 'Business', 'Technology', 'Sports', 'Entertainment', 'Education', 'Jobs', 'Politics', 'World'];
 
@@ -86,16 +87,19 @@ export async function writeOne(env) {
   // pick the best topic: skip junk / thin material, ask AI whether there is one clear story
   const cands = (await env.DB.prepare("SELECT * FROM topics WHERE status='ready' ORDER BY id LIMIT 8").all()).results
     .sort((a, b) => trafficNum(b.traffic) - trafficNum(a.traffic));
-  let topic = null, research = {}, angle = '', vetted = 0, skipped = [];
+  let topic = null, research = {}, angle = '', vetted = 0, skipped = [], play = null;
   for (const c of cands) {
     let rs = {}; try { rs = JSON.parse(c.research || '{}'); } catch {}
     if (JUNK.test(c.query) || !richEnough(rs)) { await reject(env, c, rs, 'Kaam ka topic nahi (live/rate type ya sources mein article text kam)'); skipped.push(c.query); continue; }
+    // playbook (no AI): wrong topic type / stale / thin sources are rejected here for free, before any tokens are spent
+    const pf = preflight(c, rs);
+    if (!pf.ok) { await reject(env, c, rs, 'Playbook (bina AI): ' + pf.reason); skipped.push(c.query); continue; }
     if (vetted >= 4) break;
     vetted++;
     const v = await vetTopic(env, c, rs);
     if (v.unknown) { skipped.push(c.query + ' (AI jawab nahi de raha)'); continue; }
     if (v.no) { await reject(env, c, rs, 'Saaf khabar nahi: ' + v.reason); skipped.push(c.query); continue; }
-    topic = c; research = rs; angle = v.angle; break;
+    topic = c; research = rs; angle = v.angle; play = pf; break;
   }
   if (!topic) return { ok: false, reason: 'Koi kaam ka topic nahi mila' + (skipped.length ? ` (hataye gaye: ${skipped.join(', ')})` : '') };
   const srcs = research.sources || [];
@@ -109,7 +113,7 @@ export async function writeOne(env) {
   const sections = target < 350 ? '2-3' : '4-5';
 
   // ---- 1) draft ----
-  const draftPrompt = `You are a careful news editor. Write ONE original explainer article in ${lang} about the topic "${topic.query}".${angle ? `\nFocus: ${angle}` : ''}
+  const draftPrompt = `You are a careful news editor. Write ONE original explainer article in ${lang} about the topic "${topic.query}".${angle ? `\nFocus: ${angle}` : ''}${play && play.rules.length ? `\nTopic type: ${play.type}. Extra rules:\n${play.rules.map((x) => '- ' + x).join('\n')}` : ''}
 Use ONLY facts that appear in the SOURCE NOTES below. If a detail is not in the notes, leave it out. Do not invent numbers, quotes, dates, names, reactions or opinions.
 Do not describe photos or videos, public or online reaction, background history, or future plans unless the notes explicitly say so. Do not say a person "said" or "posted" something unless the notes say so.
 Never use quotation marks or direct quotes: report what people said in your own words.
@@ -131,6 +135,10 @@ ${notesText}`;
   const art = parseDraft(d.text);
   const wc = art.body.trim().split(/\s+/).filter(Boolean).length;
   if (!art.title || !art.body || wc < 150) return retryLater(env, topic, research, `Draft adhoora (${wc} shabd)`);
+
+  // code-only guard BEFORE the paid fact-checker: invented numbers or names -> stop here, no checker tokens spent
+  const pre = postflight(art, notesText, env.POST_LANG === 'en' ? 'en' : 'hi');
+  if (!pre.ok) return reject(env, topic, research, 'Code-check (bina AI, checker nahi chalaya): ' + pre.reason);
 
   // ---- 2) grounded fact-check by a second pass (prefers a different model) ----
   const checkEnv = { ...env, AI_MODEL: models.find((m) => m !== d.model) };
@@ -193,7 +201,7 @@ ${art.title}\n${art.body}`;
   // image + video (never fails the draft)
   const media = pid ? await addMedia(env, pid, { query: topic.query, tags: String(art.tags || '').split(',').map((x) => x.trim()).filter(Boolean) }).catch(() => ({})) : {};
   research.check = {
-    media: JSON.stringify(media), writer: d.model, checker: c.model, claims: claims.length, supported: okCount, groundedScore, overlap: cc.overlap, longest: cc.longest, angle, target,
+    media: JSON.stringify(media), type: play && play.type, writer: d.model, checker: c.model, claims: claims.length, supported: okCount, groundedScore, overlap: cc.overlap, longest: cc.longest, angle, target,
     unsupported: unsupported.map((x) => x.claim).join(' ; ').slice(0, 600), numbersNotInSources: missingNums.slice(0, 8).join(','),
   };
   await env.DB.prepare("UPDATE topics SET status='used',research=?,updated_at=? WHERE id=?").bind(JSON.stringify(research), t, topic.id).run();

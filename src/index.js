@@ -4,8 +4,11 @@ import { runAI } from './ai.js';
 import { writeOne } from './writer.js';
 import { addMedia } from './media.js';
 import { validatePost } from './validate.js';
+import { preflight } from './playbook.js';
 const now = () => Math.floor(Date.now() / 1000);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+// zero-token verdict shown next to each topic: will the draft button even try it?
+const pfTag = (r) => { try { if (r.status !== 'ready') return ''; const p = preflight(r, JSON.parse(r.research || '{}')); return p.ok ? `<span class="tag" style="background:#dff3e3">&#10003; ${esc(p.label)}</span>` : `<span class="tag" style="background:#fde8e8">&#10007; ${esc(p.reason)}</span>`; } catch { return ''; } };
 const day = (t) => new Date(t * 1000).toISOString().slice(0, 10);
 const LIVE = "status='approved' AND publish_at<=?";
 const PER_PAGE = 12;
@@ -320,9 +323,9 @@ async function admin(req, env, p, url) {
     return go('/admin/topics?msg=' + encodeURIComponent(msg));
   }
   if (p === '/admin/topics') {
-    const { results } = await env.DB.prepare('SELECT id,query,traffic,status,source_count FROM topics ORDER BY id DESC LIMIT 60').all();
+    const { results } = await env.DB.prepare("SELECT id,query,traffic,status,source_count,CASE WHEN status='ready' THEN research END AS research FROM topics ORDER BY id DESC LIMIT 60").all();
     const msg = url.searchParams.get('msg');
-    return A('Topics', `<h1>Trending topics</h1>${msg ? `<p class="note">${esc(msg)}</p>` : ''}<form method="post" action="/admin/topics/run"><button>Abhi trends + research chalao</button></form><form method="post" action="/admin/write"><button class="g">Ek draft abhi likho (1-2 min lagenge, page band mat karna)</button></form>${results.map((r) => `<div class="card"><div class="p"><a href="/admin/topic/${r.id}"><b>${esc(r.query)}</b></a><div class="m"><span class="tag">${esc(r.status)}</span> sources: ${r.source_count} &middot; ${esc(r.traffic)}</div></div></div>`).join('') || '<p>Abhi koi topic nahi. Upar ka button dabao.</p>'}`);
+    return A('Topics', `<h1>Trending topics</h1>${msg ? `<p class="note">${esc(msg)}</p>` : ''}<form method="post" action="/admin/topics/run"><button>Abhi trends + research chalao</button></form><form method="post" action="/admin/write"><button class="g">Ek draft abhi likho (1-2 min lagenge, page band mat karna)</button></form>${results.map((r) => `<div class="card"><div class="p"><a href="/admin/topic/${r.id}"><b>${esc(r.query)}</b></a><div class="m"><span class="tag">${esc(r.status)}</span> sources: ${r.source_count} &middot; ${esc(r.traffic)} ${pfTag(r)}</div></div></div>`).join('') || '<p>Abhi koi topic nahi. Upar ka button dabao.</p>'}`);
   }
   const tm = p.match(/^\/admin\/topic\/(\d+)$/);
   if (tm) {
