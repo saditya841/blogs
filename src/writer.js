@@ -81,7 +81,7 @@ export async function writeOne(env, opts = {}) {
   // pick the best topic: skip junk / thin material (bina AI ke: playbook + facts)
   // opts.topicId = admin ne card dekhkar is topic ko chuna: sirf wahi likha jayega
   const cands = (opts.topicId
-    ? (await env.DB.prepare('SELECT * FROM topics WHERE id=?').bind(opts.topicId).all()).results.filter((t) => ['ready', 'carded'].includes(t.status))
+    ? (await env.DB.prepare('SELECT * FROM topics WHERE id=?').bind(opts.topicId).all()).results.filter((t) => ['ready', 'carded', 'card_live'].includes(t.status))
     : (await env.DB.prepare("SELECT * FROM topics WHERE status='ready' ORDER BY id LIMIT 8").all()).results)
     .sort((a, b) => trafficNum(b.traffic) - trafficNum(a.traffic));
   const lang0 = env.POST_LANG === 'en' ? 'en' : 'hi';

@@ -3,6 +3,7 @@ import { collectTopics, researchPending } from './trends.js';
 import { runAI } from './ai.js';
 import { writeOne } from './writer.js';
 import { cardOne } from './card.js';
+import { writeCardPost, renderCardPage, renderCardsList } from './cardpost.js';
 import { addMedia, makeHook } from './media.js';
 import { validatePost } from './validate.js';
 const now = () => Math.floor(Date.now() / 1000);
@@ -203,6 +204,21 @@ export default {
       return new Response('not found', { status: 404 });
     }
 
+    // ----- card posts (public, thumbnail jaisa design) -----
+    const cpm = p.match(/^\/card\/(\d+)$/);
+    if (cpm || p === '/cards') {
+      const notFound = () => html('<!doctype html><meta charset="utf-8"><meta name="robots" content="noindex"><body style="font-family:system-ui;padding:24px"><h1>404</h1><p>Yeh card nahi mila. <a href="/cards">Sab card dekho</a></p>', 404, false);
+      if (cpm) {
+        const r = await env.DB.prepare('SELECT * FROM topics WHERE id=?').bind(Number(cpm[1])).first();
+        let d = {}; try { d = JSON.parse((r && r.research) || '{}'); } catch {}
+        if (!r || r.status !== 'card_live' || !d.post) return notFound();
+        return html(renderCardPage(env, r, d.post));
+      }
+      const rows = (await env.DB.prepare("SELECT id,query,research FROM topics WHERE status='card_live' ORDER BY updated_at DESC LIMIT 30").all()).results
+        .map((r) => { let d = {}; try { d = JSON.parse(r.research || '{}'); } catch {} return { id: r.id, post: d.post }; }).filter((r) => r.post);
+      return html(renderCardsList(env, rows));
+    }
+
     // ----- admin -----
     if (p.startsWith('/admin')) return admin(req, env, p, url);
 
@@ -335,6 +351,14 @@ async function admin(req, env, p, url) {
     catch (e) { msg = 'ERROR: ' + e.message; }
     return go('/admin/topics?msg=' + encodeURIComponent(msg.slice(0, 350)));
   }
+  // Card post banao: chhota AI call (facts -> 3-5 point), turant /card/<id> par live
+  const cpa = p.match(/^\/admin\/topic\/(\d+)\/card-post$/);
+  if (cpa && req.method === 'POST') {
+    let msg = '';
+    try { const r = await writeCardPost(env, Number(cpa[1])); msg = r.ok ? `Card live: ${r.url}` : r.reason; }
+    catch (e) { msg = 'ERROR: ' + e.message; }
+    return go('/admin/topics?msg=' + encodeURIComponent(msg.slice(0, 350)));
+  }
   // Approve: card dekhkar is topic ka article likhwao (yahin AI token lagte hain)
   const wm = p.match(/^\/admin\/topic\/(\d+)\/write$/);
   if (wm && req.method === 'POST') {
@@ -353,7 +377,7 @@ async function admin(req, env, p, url) {
     const r = await env.DB.prepare('SELECT * FROM topics WHERE id=?').bind(Number(tm[1])).first();
     if (!r) return go('/admin/topics');
     let d = {}; try { d = JSON.parse(r.research || '{}'); } catch {}
-    return A('Topic', `<h1>${esc(r.query)}</h1><p><span class="tag">${esc(r.status)}</span> ${esc(r.traffic)}</p>${d.errors && d.errors.length ? `<p class="note">Provider errors: ${esc(d.errors.join(' | '))} (koshish: ${d.tried || 0} outlets)</p>` : ''}${d.reject_reason ? `<p class="note">Reject karne ki wajah: ${esc(d.reject_reason)}</p>` : ''}${d.park_reason ? `<p class="note">Abhi ruka hai (baad mein dobara try hoga): ${esc(d.park_reason)}</p>` : ''}${d.card ? `<div class="card"><div class="p"><b>Card: ${esc(d.card.hook)}</b> <span class="tag">${esc(d.card.label || '')}</span><ul>${(d.card.facts || []).map((f) => `<li>${esc(f.text)} <span class="m">(${esc((f.outlets || []).join(', '))})</span></li>`).join('')}</ul><form method="post" action="/admin/topic/${r.id}/write"><button class="g">Approve: iska article likho (AI token lagenge, 1-2 min)</button></form></div></div>` : ''}${d.diag ? `<p class="note">Pichli koshish ka hisaab: overlap ${Math.round((d.diag.overlap || 0) * 100)}%, sabse lambi copy ${d.diag.longest || 0} shabd, score ${d.diag.score}. Claims: ${esc((d.diag.claimList || []).map((x) => (x.ok ? 'OK' : 'FAIL(' + (x.why || '') + ')') + ' ' + x.c).join(' | ').slice(0, 900))}</p>` : ''}${d.check ? `<p class="note">Checks: ${esc(JSON.stringify(d.check))}</p>` : ''}${(d.sources || []).map((s) => `<div class="card"><div class="p"><b>${esc(s.source)}</b><br><a href="${esc(/^https?:\/\//i.test(String(s.url || '')) ? s.url : '#')}" target="_blank" rel="noopener">${esc(s.title)}</a><p class="m">${esc(s.snippet)}</p><p class="m">${(s.text || '').length} akshar text</p></div></div>`).join('') || '<p>Research abhi baaki hai.</p>'}<p><a href="/admin/topics">Back</a></p>`);
+    return A('Topic', `<h1>${esc(r.query)}</h1><p><span class="tag">${esc(r.status)}</span> ${esc(r.traffic)}</p>${d.errors && d.errors.length ? `<p class="note">Provider errors: ${esc(d.errors.join(' | '))} (koshish: ${d.tried || 0} outlets)</p>` : ''}${d.reject_reason ? `<p class="note">Reject karne ki wajah: ${esc(d.reject_reason)}</p>` : ''}${d.park_reason ? `<p class="note">Abhi ruka hai (baad mein dobara try hoga): ${esc(d.park_reason)}</p>` : ''}${d.card ? `<div class="card"><div class="p"><b>Card: ${esc(d.card.hook)}</b> <span class="tag">${esc(d.card.label || '')}</span><ul>${(d.card.facts || []).map((f) => `<li>${esc(f.text)} <span class="m">(${esc((f.outlets || []).join(', '))})</span></li>`).join('')}</ul>${r.status === 'card_live' ? `<p><a href="/card/${r.id}" target="_blank">Card post dekho: /card/${r.id}</a></p>` : `<form method="post" action="/admin/topic/${r.id}/card-post"><button class="g">Card post banao (chhota AI call, turant live)</button></form>`}<form method="post" action="/admin/topic/${r.id}/write"><button class="g">Approve: iska article likho (AI token lagenge, 1-2 min)</button></form></div></div>` : ''}${d.diag ? `<p class="note">Pichli koshish ka hisaab: overlap ${Math.round((d.diag.overlap || 0) * 100)}%, sabse lambi copy ${d.diag.longest || 0} shabd, score ${d.diag.score}. Claims: ${esc((d.diag.claimList || []).map((x) => (x.ok ? 'OK' : 'FAIL(' + (x.why || '') + ')') + ' ' + x.c).join(' | ').slice(0, 900))}</p>` : ''}${d.check ? `<p class="note">Checks: ${esc(JSON.stringify(d.check))}</p>` : ''}${(d.sources || []).map((s) => `<div class="card"><div class="p"><b>${esc(s.source)}</b><br><a href="${esc(/^https?:\/\//i.test(String(s.url || '')) ? s.url : '#')}" target="_blank" rel="noopener">${esc(s.title)}</a><p class="m">${esc(s.snippet)}</p><p class="m">${(s.text || '').length} akshar text</p></div></div>`).join('') || '<p>Research abhi baaki hai.</p>'}<p><a href="/admin/topics">Back</a></p>`);
   }
 
   const m = p.match(/^\/admin\/post\/(\d+)(\/action)?$/);
