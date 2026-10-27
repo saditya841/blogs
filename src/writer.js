@@ -3,7 +3,9 @@ import { runAI, modelList } from './ai.js';
 import { JUNK } from './trends.js';
 import { addMedia } from './media.js';
 import { groundedCheck as strictGroundedCheck, numbersNotIn, latinNotIn, expectedClaims } from './verify.js';
-import { preflight, postflight } from './playbook.js';
+import { preflight } from './playbook.js';
+import { extractFacts } from './facts.js';
+import { parkTopic } from './card.js';
 const now = () => Math.floor(Date.now() / 1000);
 const CATS = ['India', 'Odisha', 'Business', 'Technology', 'Sports', 'Entertainment', 'Education', 'Jobs', 'Politics', 'World'];
 
@@ -66,40 +68,33 @@ async function retryLater(env, topic, research, reason) {
 }
 const trafficNum = (t) => Number(String(t || '').replace(/[^0-9]/g, '')) || 0;
 
-// Is there ONE clear news story in these headlines? -> { no, angle, reason } or { unknown:true } if the AI gave nothing
-async function vetTopic(env, topic, research) {
-  const heads = (research.sources || []).map((s) => `- ${s.source}: ${s.title}`).join('\n');
-  const r = await runAI(env, [{ role: 'user', content: `Search query: "${topic.query}"\nHeadlines found:\n${heads}\n\nReply with ONE line only.\n"YES: <one-sentence angle for an explainer article>" if these headlines describe one clear news story or topic of public interest that can be explained to readers.\n"NO: <short reason>" if the query is a brand, TV channel, app, bare person name, live-data query (rates, prices, scores), or the headlines do not share one story.` }], { max_tokens: 800, temperature: 0 });
-  if (!r.text) return { unknown: true }; // AI down: do not reject the topic, just skip it for now
-  const m = r.text.match(/\b(YES|NO)\b\s*[:\-]\s*([^\n]*)/i);
-  if (!m) return { no: true, reason: 'topic check ka jawab saaf nahi tha' }; // unclear -> do NOT write
-  return m[1].toUpperCase() === 'NO' ? { no: true, reason: m[2].slice(0, 120) } : { no: false, angle: m[2].slice(0, 200) };
-}
+// (vetTopic hata diya gaya: topic ki jaanch ab bina AI ke hoti hai: playbook.preflight + facts.extractFacts)
 
 // ---- grounded fact-check: ONE strict implementation lives in verify.js (numbers must sit inside the evidence line itself) ----
 export const groundedCheck = strictGroundedCheck;
 
-export async function writeOne(env) {
+export async function writeOne(env, opts = {}) {
   const limit = Number(env.DAILY_POST_LIMIT || 4);
   const made = (await env.DB.prepare('SELECT COUNT(*) c FROM posts WHERE created_at>?').bind(now() - 86400).first()).c;
   if (made >= limit) return { ok: false, reason: `Aaj ki limit (${limit}) poori` };
 
-  // pick the best topic: skip junk / thin material, ask AI whether there is one clear story
-  const cands = (await env.DB.prepare("SELECT * FROM topics WHERE status='ready' ORDER BY id LIMIT 8").all()).results
+  // pick the best topic: skip junk / thin material (bina AI ke: playbook + facts)
+  // opts.topicId = admin ne card dekhkar is topic ko chuna: sirf wahi likha jayega
+  const cands = (opts.topicId
+    ? (await env.DB.prepare('SELECT * FROM topics WHERE id=?').bind(opts.topicId).all()).results.filter((t) => ['ready', 'carded'].includes(t.status))
+    : (await env.DB.prepare("SELECT * FROM topics WHERE status='ready' ORDER BY id LIMIT 8").all()).results)
     .sort((a, b) => trafficNum(b.traffic) - trafficNum(a.traffic));
-  let topic = null, research = {}, angle = '', vetted = 0, skipped = [], play = null;
+  const lang0 = env.POST_LANG === 'en' ? 'en' : 'hi';
+  let topic = null, research = {}, angle = '', rules = [], skipped = [];
   for (const c of cands) {
     let rs = {}; try { rs = JSON.parse(c.research || '{}'); } catch {}
     if (JUNK.test(c.query) || !richEnough(rs)) { await reject(env, c, rs, 'Kaam ka topic nahi (live/rate type ya sources mein article text kam)'); skipped.push(c.query); continue; }
-    // playbook (no AI): wrong topic type / stale / thin sources are rejected here for free, before any tokens are spent
+    // bina AI ki jaanch: topic ka type, taazgi, sources ki ginti, aur kya 2 outlet ek hi khabar bata rahe hain
     const pf = preflight(c, rs);
-    if (!pf.ok) { await reject(env, c, rs, 'Playbook (bina AI): ' + pf.reason); skipped.push(c.query); continue; }
-    if (vetted >= 4) break;
-    vetted++;
-    const v = await vetTopic(env, c, rs);
-    if (v.unknown) { skipped.push(c.query + ' (AI jawab nahi de raha)'); continue; }
-    if (v.no) { await reject(env, c, rs, 'Saaf khabar nahi: ' + v.reason); skipped.push(c.query); continue; }
-    topic = c; research = rs; angle = v.angle; play = pf; break;
+    if (!pf.ok) { await parkTopic(env, c, rs, pf.reason, pf.retry); skipped.push(`${c.query} (${pf.reason.slice(0, 70)})`); continue; }
+    const fx = extractFacts(rs.sources || [], { lang: lang0 });
+    if (fx.agreed < 2) { await parkTopic(env, c, rs, `Sources ek khabar par sehmat nahi (2 outlet ke sanjhe facts: ${fx.agreed})`, true); skipped.push(`${c.query} (sources bikhre hue)`); continue; }
+    topic = c; research = rs; rules = pf.rules || []; break;
   }
   if (!topic) return { ok: false, reason: 'Koi kaam ka topic nahi mila' + (skipped.length ? ` (hataye gaye: ${skipped.join(', ')})` : '') };
   const srcs = research.sources || [];
@@ -113,7 +108,7 @@ export async function writeOne(env) {
   const sections = target < 350 ? '2-3' : '4-5';
 
   // ---- 1) draft ----
-  const draftPrompt = `You are a careful news editor. Write ONE original explainer article in ${lang} about the topic "${topic.query}".${angle ? `\nFocus: ${angle}` : ''}${play && play.rules.length ? `\nTopic type: ${play.type}. Extra rules:\n${play.rules.map((x) => '- ' + x).join('\n')}` : ''}
+  const draftPrompt = `You are a careful news editor. Write ONE original explainer article in ${lang} about the topic "${topic.query}".${angle ? `\nFocus: ${angle}` : ''}${rules.length ? `\nExtra rules for this kind of topic:\n- ${rules.join('\n- ')}` : ''}
 Use ONLY facts that appear in the SOURCE NOTES below. If a detail is not in the notes, leave it out. Do not invent numbers, quotes, dates, names, reactions or opinions.
 Do not describe photos or videos, public or online reaction, background history, or future plans unless the notes explicitly say so. Do not say a person "said" or "posted" something unless the notes say so.
 Never use quotation marks or direct quotes: report what people said in your own words.
@@ -135,10 +130,6 @@ ${notesText}`;
   const art = parseDraft(d.text);
   const wc = art.body.trim().split(/\s+/).filter(Boolean).length;
   if (!art.title || !art.body || wc < 150) return retryLater(env, topic, research, `Draft adhoora (${wc} shabd)`);
-
-  // code-only guard BEFORE the paid fact-checker: invented numbers or names -> stop here, no checker tokens spent
-  const pre = postflight(art, notesText, env.POST_LANG === 'en' ? 'en' : 'hi');
-  if (!pre.ok) return reject(env, topic, research, 'Code-check (bina AI, checker nahi chalaya): ' + pre.reason);
 
   // ---- 2) grounded fact-check by a second pass (prefers a different model) ----
   const checkEnv = { ...env, AI_MODEL: models.find((m) => m !== d.model) };
@@ -177,7 +168,12 @@ ${art.title}\n${art.body}`;
   if (cc.longest >= 14) why.push(`${cc.longest} shabd ki line sources se mil rahi`);
   if (bad >= 3) why.push(`${bad} claims ka sabut sources mein nahi: ` + unsupported.map((x) => x.claim).join(' ; ').slice(0, 300));
   if (score < 70) why.push(`Score ${score} kam`);
-  if (why.length) return reject(env, topic, research, why.join('; '));
+  if (why.length) {
+    // har fail ka poora sabut save: kaun sa claim, evidence kya thi, kitna overlap (admin topic page par dikhta hai)
+    research.diag = { at: now(), overlap: cc.overlap, longest: cc.longest, groundedScore, score, bad,
+      claimList: claims.map((x) => ({ ok: x.ok, c: x.claim, e: String(x.evidence || '').slice(0, 160), why: x.why })) };
+    return retryLater(env, topic, research, why.join('; '));
+  }
 
   const postLang = env.POST_LANG === 'en' ? 'en' : 'hi';
   const fullText = art.title + '\n' + art.summary + '\n' + art.body;
@@ -199,9 +195,9 @@ ${art.title}\n${art.body}`;
     pid = (ins.meta && ins.meta.last_row_id) || 0;
   } catch (e) { return reject(env, topic, research, 'Save error: ' + e.message); }
   // image + video (never fails the draft)
-  const media = pid ? await addMedia(env, pid, { query: topic.query, tags: String(art.tags || '').split(',').map((x) => x.trim()).filter(Boolean) }).catch(() => ({})) : {};
+  const media = pid ? await addMedia(env, pid, { query: topic.query, title: art.title, category, tags: String(art.tags || '').split(',').map((x) => x.trim()).filter(Boolean) }).catch(() => ({})) : {};
   research.check = {
-    media: JSON.stringify(media), type: play && play.type, writer: d.model, checker: c.model, claims: claims.length, supported: okCount, groundedScore, overlap: cc.overlap, longest: cc.longest, angle, target,
+    media: JSON.stringify(media), writer: d.model, checker: c.model, claims: claims.length, supported: okCount, groundedScore, overlap: cc.overlap, longest: cc.longest, angle, target,
     unsupported: unsupported.map((x) => x.claim).join(' ; ').slice(0, 600), numbersNotInSources: missingNums.slice(0, 8).join(','),
   };
   await env.DB.prepare("UPDATE topics SET status='used',research=?,updated_at=? WHERE id=?").bind(JSON.stringify(research), t, topic.id).run();

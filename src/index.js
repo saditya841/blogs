@@ -2,13 +2,11 @@
 import { collectTopics, researchPending } from './trends.js';
 import { runAI } from './ai.js';
 import { writeOne } from './writer.js';
-import { addMedia } from './media.js';
+import { cardOne } from './card.js';
+import { addMedia, makeHook } from './media.js';
 import { validatePost } from './validate.js';
-import { preflight } from './playbook.js';
 const now = () => Math.floor(Date.now() / 1000);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-// zero-token verdict shown next to each topic: will the draft button even try it?
-const pfTag = (r) => { try { if (r.status !== 'ready') return ''; const p = preflight(r, JSON.parse(r.research || '{}')); return p.ok ? `<span class="tag" style="background:#dff3e3">&#10003; ${esc(p.label)}</span>` : `<span class="tag" style="background:#fde8e8">&#10007; ${esc(p.reason)}</span>`; } catch { return ''; } };
 const day = (t) => new Date(t * 1000).toISOString().slice(0, 10);
 const LIVE = "status='approved' AND publish_at<=?";
 const PER_PAGE = 12;
@@ -34,6 +32,7 @@ input,textarea,button,select{width:100%;padding:10px;margin:6px 0;font:inherit;b
 .poster .pt{font-weight:800;font-size:clamp(17px,3.4vw,22px);line-height:1.35;display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden;text-shadow:0 2px 10px rgba(0,0,0,.3)}
 .poster .pf{display:flex;justify-content:space-between;font-size:12px;font-weight:600;opacity:.9}.poster.hero{border-radius:10px;padding:22px 26px}.poster.hero .pt{font-size:clamp(22px,4.4vw,34px);-webkit-line-clamp:5}
 .credit{display:block;margin-top:4px}
+.tb{position:relative;display:block;aspect-ratio:16/9;overflow:hidden;background:#111;border-radius:inherit}.tb img{display:block;width:100%;height:100%;aspect-ratio:auto;object-fit:cover;border-radius:0}.tb:after{content:"";position:absolute;inset:0;background:linear-gradient(90deg,rgba(0,0,0,.8) 0%,rgba(0,0,0,.4) 55%,transparent 100%),linear-gradient(0deg,rgba(0,0,0,.55),transparent 45%)}.tb .tc,.tb .th{position:absolute;left:4%;z-index:1}.tb .tc{top:7%;background:#e11d48;color:#fff;font-weight:800;font-size:12px;letter-spacing:.6px;text-transform:uppercase;padding:3px 10px;border-radius:4px}.tb .th{bottom:9%;max-width:68%;font-weight:900;font-size:clamp(18px,4.2vw,26px);line-height:1.25;color:#fff;text-shadow:0 2px 0 #000,0 0 12px rgba(0,0,0,.9)}.tb .th b{color:#ffe600}.tb.big{border-radius:10px}.tb.big .th{font-size:clamp(24px,5.2vw,42px)}.tb.big .tc{font-size:14px}
 @media(min-width:700px){.grid{grid-template-columns:1fr 1fr}}`;
 
 const jsonld = (o) => `<script type="application/ld+json">${JSON.stringify(o).replace(/</g, '\\u003c')}</script>`;
@@ -85,7 +84,14 @@ const cover = (r, hero = false) => {
   const t = String(r.title || '').slice(0, 120);
   return `<div class="poster${hero ? ' hero' : ''}" style="background:linear-gradient(135deg,${GRAD[h % GRAD.length]})"><span class="pc">${esc(k)}</span><div class="pt">${esc(t)}</div><div class="pf"><span>virall.in</span><span>${r.publish_at ? day(r.publish_at) : ''}</span></div></div>`;
 };
-const card = (r) => `<div class="card">${r.image_url ? `<a href="/post/${r.slug}"><img loading="lazy" width="640" height="360" src="${esc(r.image_url)}" alt="${esc(r.title)}"></a>` : `<a href="/post/${r.slug}">${cover(r)}</a>`}<div class="p">${r.category ? `<a class="chip" href="/category/${encodeURIComponent(r.category)}">${esc(r.category)}</a>` : ''}<h2><a href="/post/${r.slug}">${esc(r.title)}</a></h2><div class="m">${day(r.publish_at)}</div><p>${esc(r.summary)}</p></div></div>`;
+// AI thumbnails (our own /img/<id>.jpg) get a headline overlay: short hook, last words in yellow, category badge. Real photos stay plain.
+const aiImg = (u) => /^https:\/\/[^/]+\/img\/[a-z0-9]+\.jpg$/i.test(String(u || ''));
+const thumb = (r, big = false) => {
+  const w = makeHook(r.title).split(' ').filter(Boolean), n = w.length > 3 ? 2 : 1;
+  const hook = `${esc(w.slice(0, -n).join(' '))} <b>${esc(w.slice(-n).join(' '))}</b>`;
+  return `<div class="tb${big ? ' big' : ''}"><img ${big ? 'class="hero" width="1200" height="675" fetchpriority="high"' : 'loading="lazy" width="640" height="360"'} src="${esc(r.image_url)}" alt="${esc(r.title)}">${r.category ? `<span class="tc">${esc(r.category)}</span>` : ''}<div class="th">${hook}</div></div>`;
+};
+const card = (r) => `<div class="card">${r.image_url ? `<a href="/post/${r.slug}">${aiImg(r.image_url) ? thumb(r) : `<img loading="lazy" width="640" height="360" src="${esc(r.image_url)}" alt="${esc(r.title)}">`}</a>` : `<a href="/post/${r.slug}">${cover(r)}</a>`}<div class="p">${r.category ? `<a class="chip" href="/category/${encodeURIComponent(r.category)}">${esc(r.category)}</a>` : ''}<h2><a href="/post/${r.slug}">${esc(r.title)}</a></h2><div class="m">${day(r.publish_at)}</div><p>${esc(r.summary)}</p></div></div>`;
 
 // ---------- static trust pages (AdSense / E-E-A-T essentials) ----------
 function staticPage(env, key) {
@@ -254,7 +260,7 @@ export default {
       const enc = encodeURIComponent, shareT = enc(r.title), shareU = enc(canon);
       const b = `<div class="crumb"><a href="/">Home</a>${r.category ? ` &rsaquo; <a href="/category/${enc(r.category)}">${esc(r.category)}</a>` : ''}</div>
 <article><h1>${esc(r.title)}</h1><div class="m">By ${esc(env.AUTHOR_NAME)} &middot; Published ${day(r.publish_at)}${r.updated_at && r.updated_at - r.publish_at > 86400 ? ` &middot; Updated ${day(r.updated_at)}` : ''} &middot; ${Math.max(1, Math.round(wc / 200))} min read</div>
-${r.image_url ? `<p><img class="hero" width="1200" height="675" fetchpriority="high" src="${esc(r.image_url)}" alt="${esc(r.title)}"><span class="m credit">Image: ${esc(r.image_credit)}</span></p>` : `<p>${cover(r, true)}</p>`}
+${r.image_url ? `<p>${aiImg(r.image_url) ? thumb(r, true) : `<img class="hero" width="1200" height="675" fetchpriority="high" src="${esc(r.image_url)}" alt="${esc(r.title)}">`}<span class="m credit">Image: ${esc(r.image_credit)}</span></p>` : `<p>${cover(r, true)}</p>`}
 <p><i>${esc(r.summary)}</i></p>
 ${h2s.length >= 3 ? `<nav class="toc" aria-label="Contents"><b>Contents</b><ol>${h2s.map((h) => `<li><a href="#${h.id}">${esc(h.t)}</a></li>`).join('')}</ol></nav>` : ''}
 ${bodyHtml}
@@ -320,19 +326,34 @@ async function admin(req, env, p, url) {
     let msg = '';
     try { const r = await writeOne(env); msg = r.ok ? `Draft ban gaya: ${r.title} (score ${r.score}, ${r.words} shabd)` : 'Draft nahi bana: ' + r.reason; }
     catch (e) { msg = 'ERROR: ' + e.message; }
-    return go('/admin/topics?msg=' + encodeURIComponent(msg));
+    return go('/admin/topics?msg=' + encodeURIComponent(msg.slice(0, 350)));
+  }
+  // Fact Card: bina AI (0 token), turant
+  if (p === '/admin/card' && req.method === 'POST') {
+    let msg = '';
+    try { const r = await cardOne(env); msg = r.ok ? `Card ban gaya: ${r.query} (${r.facts} facts, 0 token). Topic kholkar dekho.` : 'Card nahi bana: ' + r.reason; }
+    catch (e) { msg = 'ERROR: ' + e.message; }
+    return go('/admin/topics?msg=' + encodeURIComponent(msg.slice(0, 350)));
+  }
+  // Approve: card dekhkar is topic ka article likhwao (yahin AI token lagte hain)
+  const wm = p.match(/^\/admin\/topic\/(\d+)\/write$/);
+  if (wm && req.method === 'POST') {
+    let msg = '';
+    try { const r = await writeOne(env, { topicId: Number(wm[1]) }); msg = r.ok ? `Draft ban gaya: ${r.title} (score ${r.score}, ${r.words} shabd)` : 'Draft nahi bana: ' + r.reason; }
+    catch (e) { msg = 'ERROR: ' + e.message; }
+    return go('/admin/topics?msg=' + encodeURIComponent(msg.slice(0, 350)));
   }
   if (p === '/admin/topics') {
-    const { results } = await env.DB.prepare("SELECT id,query,traffic,status,source_count,CASE WHEN status='ready' THEN research END AS research FROM topics ORDER BY id DESC LIMIT 60").all();
+    const { results } = await env.DB.prepare('SELECT id,query,traffic,status,source_count FROM topics ORDER BY id DESC LIMIT 60').all();
     const msg = url.searchParams.get('msg');
-    return A('Topics', `<h1>Trending topics</h1>${msg ? `<p class="note">${esc(msg)}</p>` : ''}<form method="post" action="/admin/topics/run"><button>Abhi trends + research chalao</button></form><form method="post" action="/admin/write"><button class="g">Ek draft abhi likho (1-2 min lagenge, page band mat karna)</button></form>${results.map((r) => `<div class="card"><div class="p"><a href="/admin/topic/${r.id}"><b>${esc(r.query)}</b></a><div class="m"><span class="tag">${esc(r.status)}</span> sources: ${r.source_count} &middot; ${esc(r.traffic)} ${pfTag(r)}</div></div></div>`).join('') || '<p>Abhi koi topic nahi. Upar ka button dabao.</p>'}`);
+    return A('Topics', `<h1>Trending topics</h1>${msg ? `<p class="note">${esc(msg)}</p>` : ''}<form method="post" action="/admin/topics/run"><button>Abhi trends + research chalao</button></form><form method="post" action="/admin/card"><button class="g">Card banao (0 token, turant)</button></form><form method="post" action="/admin/write"><button class="g">Ek draft abhi likho (1-2 min lagenge, page band mat karna)</button></form>${results.map((r) => `<div class="card"><div class="p"><a href="/admin/topic/${r.id}"><b>${esc(r.query)}</b></a><div class="m"><span class="tag">${esc(r.status)}</span> sources: ${r.source_count} &middot; ${esc(r.traffic)}</div></div></div>`).join('') || '<p>Abhi koi topic nahi. Upar ka button dabao.</p>'}`);
   }
   const tm = p.match(/^\/admin\/topic\/(\d+)$/);
   if (tm) {
     const r = await env.DB.prepare('SELECT * FROM topics WHERE id=?').bind(Number(tm[1])).first();
     if (!r) return go('/admin/topics');
     let d = {}; try { d = JSON.parse(r.research || '{}'); } catch {}
-    return A('Topic', `<h1>${esc(r.query)}</h1><p><span class="tag">${esc(r.status)}</span> ${esc(r.traffic)}</p>${d.errors && d.errors.length ? `<p class="note">Provider errors: ${esc(d.errors.join(' | '))} (koshish: ${d.tried || 0} outlets)</p>` : ''}${d.reject_reason ? `<p class="note">Reject karne ki wajah: ${esc(d.reject_reason)}</p>` : ''}${d.check ? `<p class="note">Checks: ${esc(JSON.stringify(d.check))}</p>` : ''}${(d.sources || []).map((s) => `<div class="card"><div class="p"><b>${esc(s.source)}</b><br><a href="${esc(/^https?:\/\//i.test(String(s.url || '')) ? s.url : '#')}" target="_blank" rel="noopener">${esc(s.title)}</a><p class="m">${esc(s.snippet)}</p><p class="m">${(s.text || '').length} akshar text</p></div></div>`).join('') || '<p>Research abhi baaki hai.</p>'}<p><a href="/admin/topics">Back</a></p>`);
+    return A('Topic', `<h1>${esc(r.query)}</h1><p><span class="tag">${esc(r.status)}</span> ${esc(r.traffic)}</p>${d.errors && d.errors.length ? `<p class="note">Provider errors: ${esc(d.errors.join(' | '))} (koshish: ${d.tried || 0} outlets)</p>` : ''}${d.reject_reason ? `<p class="note">Reject karne ki wajah: ${esc(d.reject_reason)}</p>` : ''}${d.park_reason ? `<p class="note">Abhi ruka hai (baad mein dobara try hoga): ${esc(d.park_reason)}</p>` : ''}${d.card ? `<div class="card"><div class="p"><b>Card: ${esc(d.card.hook)}</b> <span class="tag">${esc(d.card.label || '')}</span><ul>${(d.card.facts || []).map((f) => `<li>${esc(f.text)} <span class="m">(${esc((f.outlets || []).join(', '))})</span></li>`).join('')}</ul><form method="post" action="/admin/topic/${r.id}/write"><button class="g">Approve: iska article likho (AI token lagenge, 1-2 min)</button></form></div></div>` : ''}${d.diag ? `<p class="note">Pichli koshish ka hisaab: overlap ${Math.round((d.diag.overlap || 0) * 100)}%, sabse lambi copy ${d.diag.longest || 0} shabd, score ${d.diag.score}. Claims: ${esc((d.diag.claimList || []).map((x) => (x.ok ? 'OK' : 'FAIL(' + (x.why || '') + ')') + ' ' + x.c).join(' | ').slice(0, 900))}</p>` : ''}${d.check ? `<p class="note">Checks: ${esc(JSON.stringify(d.check))}</p>` : ''}${(d.sources || []).map((s) => `<div class="card"><div class="p"><b>${esc(s.source)}</b><br><a href="${esc(/^https?:\/\//i.test(String(s.url || '')) ? s.url : '#')}" target="_blank" rel="noopener">${esc(s.title)}</a><p class="m">${esc(s.snippet)}</p><p class="m">${(s.text || '').length} akshar text</p></div></div>`).join('') || '<p>Research abhi baaki hai.</p>'}<p><a href="/admin/topics">Back</a></p>`);
   }
 
   const m = p.match(/^\/admin\/post\/(\d+)(\/action)?$/);
@@ -341,9 +362,9 @@ async function admin(req, env, p, url) {
     if (m[2] && req.method === 'POST') {
       const f = await req.formData(), a = f.get('a'), tt = now();
       if (a === 'media_refresh') {
-        const pr = await env.DB.prepare('SELECT tags FROM posts WHERE id=?').bind(id).first();
+        const pr = await env.DB.prepare('SELECT tags,title,category FROM posts WHERE id=?').bind(id).first();
         const tags = String((pr && pr.tags) || '').split(',').map((x) => x.trim()).filter(Boolean);
-        const mo = await addMedia(env, id, { query: String(f.get('q') || tags[0] || '').trim(), tags, force: true });
+        const mo = await addMedia(env, id, { query: String(f.get('q') || tags[0] || '').trim(), tags, title: pr && pr.title, category: pr && pr.category, force: true });
         return go('/admin/post/' + id + '?msg=' + encodeURIComponent('Image: ' + (mo.image || '-') + ' | Video: ' + (mo.video || '-')));
       }
       if (a === 'save_media') {
@@ -369,7 +390,7 @@ async function admin(req, env, p, url) {
     if (!r) return go('/admin');
     const btn = (a, label, c = '') => `<form method="post" action="/admin/post/${id}/action"><input type="hidden" name="a" value="${a}"><button class="${c}">${label}</button></form>`;
     const act = '/admin/post/' + id + '/action', vid = ytId(r.video_url), mmsg = url.searchParams.get('msg');
-    const mediaBlock = `<div class="card"><div class="p"><b>Image / Video</b>${mmsg ? `<p class="note">${esc(mmsg)}</p>` : ''}${r.image_credit ? `<p class="m">Image credit: ${esc(r.image_credit)}</p>` : ''}${vid ? `<div class="vid"><iframe loading="lazy" title="video" src="https://www.youtube-nocookie.com/embed/${vid}" allowfullscreen></iframe></div>` : '<p class="m">Abhi video nahi hai.</p>'}<form method="post" action="${act}"><input type="hidden" name="a" value="media_refresh"><input name="q" placeholder="English search words, jaise: Ann Li tennis"><button class="o">Image + video dobara dhoondo</button></form><form method="post" action="${act}"><input type="hidden" name="a" value="save_media"><input name="image_url" value="${esc(r.image_url)}" placeholder="Image URL (https://...)"><input name="image_credit" value="${esc(r.image_credit)}" placeholder="Image credit"><input name="video_url" value="${esc(r.video_url)}" placeholder="YouTube link"><button>Image / video save karo</button></form></div></div>`;
+    const mediaBlock = `<div class="card"><div class="p"><b>Image / Video</b>${mmsg ? `<p class="note">${esc(mmsg)}</p>` : ''}${r.image_credit ? `<p class="m">Image credit: ${esc(r.image_credit)}</p>` : ''}${vid ? `<div class="vid"><iframe loading="lazy" title="video" src="https://www.youtube-nocookie.com/embed/${vid}" allowfullscreen></iframe></div>` : '<p class="m">Abhi video nahi hai.</p>'}<form method="post" action="${act}"><input type="hidden" name="a" value="media_refresh"><input name="q" placeholder="English search words, jaise: Ann Li tennis"><button class="o">Thumbnail + video dobara banao</button></form><form method="post" action="${act}"><input type="hidden" name="a" value="save_media"><input name="image_url" value="${esc(r.image_url)}" placeholder="Image URL (https://...)"><input name="image_credit" value="${esc(r.image_credit)}" placeholder="Image credit"><input name="video_url" value="${esc(r.video_url)}" placeholder="YouTube link"><button>Image / video save karo</button></form></div></div>`;
     const vr = validatePost(r, { check: parseCheck(r) }), ck = parseCheck(r), vm = url.searchParams.get('vm');
     const li = (arr, icon, st) => arr.map((x) => `<p class="note"${st ? ` style="${st}"` : ''}>${icon} ${esc(x.msg)}</p>`).join('');
     const claimRows = ((ck && ck.claimList) || []).map((c) => `<li>${c.ok ? '&#10003;' : '&#10007;'} ${esc(c.c)}<br><span class="m">${esc(c.e)}</span></li>`).join('');
@@ -378,7 +399,7 @@ async function admin(req, env, p, url) {
     const btnF = (a, label, c = '') => `<form method="post" action="${act}"><input type="hidden" name="a" value="${a}"><input type="hidden" name="force" value="1"><button class="${c}">${label}</button></form>`;
     const approveBtns = vr.ok ? btn('approve_now', 'Approve + publish now', 'g') + btn('approve_random', 'Approve + publish at random time (within 1 hr)')
       : '<p class="note">Upar ki &#10060; galtiyan theek hone tak Approve band hai.</p>' + btnF('approve_now', 'Phir bhi approve + publish karo (meri zimmedari)', 'r');
-    return A('Review', `<h1>${esc(r.title)}</h1><p><span class="tag">${esc(r.status)}</span> score: ${r.score ?? '-'} &middot; ${r.word_count || words(r.body)} words &middot; ${esc(r.category)}</p>${r.image_url ? `<img src="${esc(r.image_url)}" style="max-width:100%">` : ''}<p><i>${esc(r.summary)}</i></p>${renderBody(r.body).html}
+    return A('Review', `<h1>${esc(r.title)}</h1><p><span class="tag">${esc(r.status)}</span> score: ${r.score ?? '-'} &middot; ${r.word_count || words(r.body)} words &middot; ${esc(r.category)}</p>${r.image_url ? (aiImg(r.image_url) ? thumb(r, true) : `<img src="${esc(r.image_url)}" style="max-width:100%">`) : ''}<p><i>${esc(r.summary)}</i></p>${renderBody(r.body).html}
 ${checkBlock}
 ${mediaBlock}
 ${approveBtns}${btn('reject', 'Reject', 'r')}${btn('to_draft', 'Back to draft', 'o')}${btn('delete', 'Delete', 'r')}`);

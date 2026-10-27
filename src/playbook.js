@@ -36,24 +36,25 @@ export function classify(query) {
 
 const words = (s) => String(s || '').toLowerCase().split(/[^\p{L}\p{M}\p{N}]+/u).filter((w) => w.length > 2);
 
-// BEFORE any AI call. topic = topics row, rs = parsed research JSON. Returns { ok, type, label, rules, reason }
+// BEFORE any AI call. topic = topics row, rs = parsed research JSON. Returns { ok, retry, type, label, rules, reason }
+// retry:true = baad mein (naye/taaza sources aane par) dobara ho sakta hai -> topic 'thin' banta hai, reject nahi. retry nahi = hamesha ke liye.
 export function preflight(topic, rs, nowSec = now()) {
   const p = classify(topic.query);
   const base = { type: p.type, label: p.label, rules: p.rules || [] };
   if (!p.allow) return { ok: false, ...base, reason: p.why };
   const src = (rs && rs.sources) || [];
-  if (src.length < p.minSources) return { ok: false, ...base, reason: `${p.label}: sirf ${src.length} source hain, ${p.minSources} chahiye` };
+  if (src.length < p.minSources) return { ok: false, retry: true, ...base, reason: `${p.label}: sirf ${src.length} source hain, ${p.minSources} chahiye` };
   // the topic's own words must really appear in at least 2 sources (stops "unrelated sources" drafts)
   const qw = words(topic.query);
   if (qw.length) {
     const texts = src.map((s) => `${s.title || ''} ${s.snippet || ''} ${s.text || ''}`.toLowerCase());
     const found = qw.filter((w) => texts.filter((t) => t.includes(w)).length >= 2).length;
-    if (found / qw.length < 0.6) return { ok: false, ...base, reason: 'Topic ke shabd 2 sources mein bhi nahi milte, sources alag cheez ki baat kar rahe hain' };
+    if (found / qw.length < 0.6) return { ok: false, retry: true, ...base, reason: 'Topic ke shabd 2 sources mein bhi nahi milte, sources alag cheez ki baat kar rahe hain' };
   }
   const dates = src.map((s) => s.date || 0).filter(Boolean);
   const newest = dates.length ? Math.max(...dates) : 0;
-  if (!newest && p.needDates) return { ok: false, ...base, reason: `${p.label}: sources ki tareekh nahi mili, taaza hone ka saboot nahi` };
-  if (newest && nowSec - newest > p.maxAgeDays * DAY) return { ok: false, ...base, reason: `${p.label}: sabse nayi source ${Math.round((nowSec - newest) / DAY)} din purani hai (limit ${p.maxAgeDays} din)` };
+  if (!newest && p.needDates) return { ok: false, retry: true, ...base, reason: `${p.label}: sources ki tareekh nahi mili, taaza hone ka saboot nahi` };
+  if (newest && nowSec - newest > p.maxAgeDays * DAY) return { ok: false, retry: true, ...base, reason: `${p.label}: sabse nayi source ${Math.round((nowSec - newest) / DAY)} din purani hai (limit ${p.maxAgeDays} din)` };
   return { ok: true, ...base };
 }
 
