@@ -34,7 +34,7 @@ DAILY_TOPIC_LIMIT = "10"
 # Roz max kitne naye drafts
 DAILY_POST_LIMIT = "5"
 # Post ki bhasha: hi ya en
-POST_LANG = "hi"
+POST_LANG = "eng"
 TRENDS_GEO = "IN"
 # Workers AI model (khali chhodo to code khud chalne wala model chunega)
 AI_MODEL = "@cf/openai/gpt-oss-20b"
