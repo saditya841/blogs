@@ -1,8 +1,9 @@
-// Workers AI helper: tries current models in order, handles different response shapes. No API key.
-// COST SAFETY (v2): reasoning models can burn the whole token budget on "thinking" and return an empty answer.
-//  - reasoning is switched to LOW (gpt-oss) / thinking OFF (others) when the model accepts it
-//  - the one retry after "finish=length" is capped at RETRY_CAP tokens (was 8000)
-//  - by default only MAX_MODELS models are tried per call (was all 4)
+// Modified ai.js - Wrapper to use Multi-API Manager when enabled
+// Falls back to Cloudflare Workers AI if disabled or external APIs fail
+
+import { MultiAPIManager } from './multi-api-manager.js';
+
+// Original Cloudflare Workers AI code (kept as fallback)
 const FALLBACKS = ['@cf/zai-org/glm-4.7-flash', '@cf/google/gemma-4-26b-a4b-it', '@cf/openai/gpt-oss-20b', '@cf/qwen/qwen3.8-27b'];
 export const RETRY_CAP = 4500;
 export const MAX_MODELS = 2;
@@ -19,7 +20,6 @@ const pickText = (r) => {
   }
   if (r.result && r.result.response) return r.result.response;
   if (typeof r.output_text === 'string' && r.output_text) return r.output_text;
-  // Responses-API style: output: [{type:'reasoning',...},{type:'message',content:[{type:'output_text',text}]}]
   if (Array.isArray(r.output)) {
     const t = r.output.filter((o) => o && o.type === 'message').flatMap((o) => (Array.isArray(o.content) ? o.content : [])).map((p) => (p && p.text) || '').join('');
     if (t) return t;
@@ -31,7 +31,6 @@ const finishOf = (r) => {
   try { return String((r && r.choices && r.choices[0] && r.choices[0].finish_reason) || (r && r.status) || ''); } catch { return ''; }
 };
 const tokensOf = (r) => { try { return Number((r && r.usage && r.usage.completion_tokens) || 0) || 0; } catch { return 0; } };
-// short description of an empty reply, so the admin error message says WHY it was empty
 const diag = (r) => {
   try {
     const ch = r && r.choices && r.choices[0];
@@ -41,18 +40,16 @@ const diag = (r) => {
   } catch { return 'diag-failed'; }
 };
 
-// settings that make reasoning models think less (not every model accepts them: see call() below)
 export const thinkLess = (model) => (/gpt-oss/i.test(model) ? { reasoning: { effort: 'low' } } : { chat_template_kwargs: { enable_thinking: false } });
 
 export function modelList(env) {
   return [env.AI_MODEL, ...FALLBACKS].filter(Boolean).filter((m, i, a) => a.indexOf(m) === i);
 }
 
-// returns { text, model, errors[], tokens }  (tokens = output tokens used by all attempts, 0 if unknown)
-export async function runAI(env, messages, opts = {}) {
+// Original Cloudflare Workers AI implementation (kept as fallback)
+async function runWorkersAI(env, messages, opts = {}) {
   const errors = [];
   let tokens = 0;
-  // opts.models = try exactly these models (caller decides); otherwise only the first MAX_MODELS
   const list = opts.models || modelList(env).slice(0, opts.maxModels || MAX_MODELS);
   for (const model of list) {
     try {
@@ -69,7 +66,6 @@ export async function runAI(env, messages, opts = {}) {
       let r = await call(max);
       tokens += tokensOf(r);
       let text = String(pickText(r)).trim();
-      // reasoning models can spend the whole budget thinking and return nothing: retry ONCE with a modestly bigger budget (never 8000)
       if (!text && /length|max_tokens|incomplete/i.test(finishOf(r))) {
         r = await call(Math.min(Math.round(max * 1.5), RETRY_CAP));
         tokens += tokensOf(r);
@@ -81,3 +77,37 @@ export async function runAI(env, messages, opts = {}) {
   }
   return { text: '', model: null, errors, tokens };
 }
+
+// NEW: Main runAI function with multi-API support
+export async function runAI(env, messages, opts = {}) {
+  const useMultiAPI = env.USE_MULTI_API === 'true';
+
+  // Try Multi-API system first if enabled
+  if (useMultiAPI) {
+    try {
+      const manager = new MultiAPIManager(env);
+      const result = await manager.generate(messages, opts);
+
+      if (result.text && result.text.trim()) {
+        return {
+          text: result.text,
+          model: `${result.provider}/${result.model}`,
+          provider: result.provider,
+          errors: result.errors,
+          tokens: result.tokens
+        };
+      }
+
+      // All external APIs failed, try Workers AI as fallback
+      console.log('Multi-API failed, falling back to Workers AI:', result.errors);
+    } catch (e) {
+      console.error('Multi-API error, falling back to Workers AI:', e);
+    }
+  }
+
+  // Fallback to original Cloudflare Workers AI
+  return await runWorkersAI(env, messages, opts);
+}
+
+// Export manager class for admin dashboard
+export { MultiAPIManager };
