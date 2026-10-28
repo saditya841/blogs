@@ -6,6 +6,8 @@ import { cardOne } from './card.js';
 import { writeCardPost, renderCardPage, renderCardsList } from './cardpost.js';
 import { addMedia, makeHook } from './media.js';
 import { validatePost } from './validate.js';
+import { handleAPIStatus } from './admin-api-status.js'; // <-- LINE 1 ADDED
+
 const now = () => Math.floor(Date.now() / 1000);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const day = (t) => new Date(t * 1000).toISOString().slice(0, 10);
