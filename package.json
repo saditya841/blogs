@@ -1,4 +1,0 @@
-{ "name": "virall-tests", "version": "1.0.0", "type": "module",
-  "scripts": { "test": "node --test --no-warnings \"test/**/*.test.js\"",
-               "test:unit": "node --test --no-warnings \"test/unit/*.test.js\"",
-               "test:integration": "node --test --no-warnings \"test/integration/*.test.js\"" } }
