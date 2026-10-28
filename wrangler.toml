@@ -1,0 +1,48 @@
+name = "blogs"
+main = "src/index.js"
+compatibility_date = "2024-11-01"
+
+[triggers]
+crons = ["0 * * * *"]
+
+[ai]
+binding = "AI"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "virall-db"
+database_id = "3e20e9da-4c1b-422c-bdd4-16dc63b9ceca"
+
+# NEW: KV namespace for API usage tracking
+[[kv_namespaces]]
+binding = "API_USAGE"
+id = "YOUR_KV_NAMESPACE_ID"  # Create this in Cloudflare dashboard
+
+[vars]
+SITE_URL = "https://virall.in"
+SITE_NAME = "Virall"
+SITE_TAGLINE = "Trending khabrein, saaf aur sourced"
+AUTHOR_NAME = "Virall Desk"
+CONTACT_EMAIL = "saditya841@gmail.com"
+ADSENSE_PUB = ""
+ADSENSE_SLOT = ""
+INDEXNOW_KEY = "k8x2m9q4v7b1n6c3z5b1"
+AUTO_APPROVE_HOURS = "1"
+AUTO_APPROVE_MIN_SCORE = "95"
+MIN_WORDS_FOR_ADS = "600"
+DAILY_TOPIC_LIMIT = "10"
+DAILY_POST_LIMIT = "5"
+POST_LANG = "eng"
+TRENDS_GEO = "IN"
+# Workers AI still available as fallback
+AI_MODEL = "@cf/openai/gpt-oss-20b"
+
+# NEW: External API Keys (add these as secrets via: wrangler secret put GROQ_API_KEY)
+# For now adding as vars for testing, move to secrets in production
+GROQ_API_KEY = "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"
+GEMINI_API_KEY = "AIzaSyC0H2PZfzm55a9x4SlTUwSO4TnqclJQ98c"
+HUGGINGFACE_API_KEY = "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"
+COHERE_API_KEY = "K7rAaZ50BZ95JH3ZZX5BSlhvbVMDD53mjBow5Gsy3t3to0"
+
+# NEW: Enable multi-API system (set to "true" to use external APIs)
+USE_MULTI_API = "true"
