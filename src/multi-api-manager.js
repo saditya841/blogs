@@ -1,328 +1,354 @@
-// Multi-API Manager: Rotates between Groq, Gemini, Hugging Face, and Cohere
-// Zero token waste, automatic fallback, copy overlap solution
+// Multi-API Manager v2 — OmniRoute-style router: Groq -> Gemini -> Hugging Face -> Cohere
+// (Workers AI backup lives in ai.js).
+//
+// What is new vs v1 (all verified against provider docs, Oct 2026):
+//  * Model lists updated: Groq retired llama-3.3-70b / llama-3.1-8b (16 Aug 2026), Gemini 1.5/2.0 are gone,
+//    api-inference.huggingface.co is decommissioned (router.huggingface.co/v1 now), Cohere moved to /v2/chat.
+//  * Every provider tries its model list in order (model-level failover), not just the first model.
+//  * System prompt is kept for every provider (Gemini systemInstruction, Cohere v2 messages).
+//  * API key for Gemini goes in a header, never in the URL (URLs end up in logs).
+//  * Smart cooldown: 401/403 (bad key), 402 (credits over), 429 (rate limit) park that provider for a while,
+//    so the next request does not waste time on it.
+//  * 25s timeout per call. temperature 0 is respected. Usage counter is serialised (no lost counts).
+//  * Models, order and soft daily limits can be changed from wrangler vars, no code edit needed:
+//    API_ORDER, GROQ_MODELS, GEMINI_MODELS, HUGGINGFACE_MODELS, COHERE_MODELS, <PROVIDER>_DAILY_LIMIT, API_TIMEOUT_MS
 
-const API_CONFIGS = {
+export const API_CONFIGS = {
   groq: {
     name: 'Groq',
     endpoint: 'https://api.groq.com/openai/v1/chat/completions',
-    models: ['llama-3.3-70b-versatile', 'mixtral-8x7b-32768'],
-    dailyLimit: 14400,
+    models: ['openai/gpt-oss-120b', 'openai/gpt-oss-20b', 'qwen/qwen3.6-27b'],
+    dailyLimit: 1000,
     style: 'conversational'
   },
   gemini: {
     name: 'Google Gemini',
     endpoint: 'https://generativelanguage.googleapis.com/v1beta/models',
-    models: ['gemini-1.5-flash', 'gemini-1.5-pro'],
-    rateLimit: 60, // per minute
+    models: ['gemini-3.5-flash', 'gemini-3.1-flash-lite', 'gemini-3-flash-preview'],
+    dailyLimit: 250,
     style: 'informative'
   },
   huggingface: {
     name: 'Hugging Face',
-    endpoint: 'https://api-inference.huggingface.co/models',
-    models: ['mistralai/Mistral-7B-Instruct-v0.2', 'meta-llama/Llama-3.2-3B-Instruct'],
+    endpoint: 'https://router.huggingface.co/v1/chat/completions',
+    models: ['openai/gpt-oss-120b', 'meta-llama/Llama-3.3-70B-Instruct'],
+    dailyLimit: 50,
     style: 'detailed'
   },
   cohere: {
     name: 'Cohere',
-    endpoint: 'https://api.cohere.ai/v1/chat',
-    models: ['command-r', 'command-light'],
+    endpoint: 'https://api.cohere.com/v2/chat',
+    models: ['command-a-03-2025', 'command-r-08-2024'],
+    dailyLimit: 30,
     style: 'professional'
   }
 };
 
+const DEFAULT_ORDER = ['groq', 'gemini', 'huggingface', 'cohere'];
+const ENV_KEY = { groq: 'GROQ', gemini: 'GEMINI', huggingface: 'HUGGINGFACE', cohere: 'COHERE' };
+
+const parseList = (v) => (typeof v === 'string' && v.trim() ? v.split(',').map((x) => x.trim()).filter(Boolean) : null);
+
+export function configFor(env, provider) {
+  const base = API_CONFIGS[provider];
+  const k = ENV_KEY[provider];
+  return {
+    ...base,
+    models: parseList(env && env[`${k}_MODELS`]) || base.models,
+    dailyLimit: Number(env && env[`${k}_DAILY_LIMIT`]) || base.dailyLimit
+  };
+}
+
+class ApiError extends Error {
+  constructor(message, status) {
+    super(message);
+    this.status = status;
+  }
+}
+
+// One write at a time inside an isolate -> the usage counter does not lose counts when calls overlap.
+let writeChain = Promise.resolve();
+const serialize = (fn) => {
+  const run = writeChain.then(fn, fn);
+  writeChain = run.catch(() => {});
+  return run;
+};
+
+const MIN = 60 * 1000;
+const COOLDOWN_MS = { auth: 180 * MIN, credits: 360 * MIN, rate: 10 * MIN };
+
 export class MultiAPIManager {
   constructor(env) {
-    this.env = env;
+    this.env = env || {};
     this.apiKeys = {
-      groq: env.GROQ_API_KEY,
-      gemini: env.GEMINI_API_KEY,
-      huggingface: env.HUGGINGFACE_API_KEY,
-      cohere: env.COHERE_API_KEY
+      groq: this.env.GROQ_API_KEY,
+      gemini: this.env.GEMINI_API_KEY,
+      huggingface: this.env.HUGGINGFACE_API_KEY,
+      cohere: this.env.COHERE_API_KEY
     };
-    this.usageTracker = {}; // Track daily usage
+    const order = (parseList(this.env.API_ORDER) || DEFAULT_ORDER).filter((p) => API_CONFIGS[p]);
+    this.order = order.length ? order : DEFAULT_ORDER;
+    this.timeoutMs = Number(this.env.API_TIMEOUT_MS) || 25000;
   }
 
-  // Get usage stats from KV storage
+  // ---------- usage (KV) ----------
+  today() {
+    return new Date().toISOString().split('T')[0];
+  }
+
   async getUsageStats() {
-    const today = new Date().toISOString().split('T')[0];
     try {
-      const stats = await this.env.API_USAGE?.get(`usage:${today}`);
+      const stats = await this.env.API_USAGE?.get(`usage:${this.today()}`);
       return stats ? JSON.parse(stats) : {};
     } catch {
       return {};
     }
   }
 
-  // Save usage stats to KV storage
   async saveUsageStats(stats) {
-    const today = new Date().toISOString().split('T')[0];
     try {
-      await this.env.API_USAGE?.put(`usage:${today}`, JSON.stringify(stats), {
-        expirationTtl: 86400 * 2 // 2 days
+      await this.env.API_USAGE?.put(`usage:${this.today()}`, JSON.stringify(stats), { expirationTtl: 86400 * 2 });
+    } catch (e) {
+      console.error('Failed to save usage stats:', e && e.message);
+    }
+  }
+
+  trackUsage(provider, tokens = 1) {
+    return serialize(async () => {
+      const stats = await this.getUsageStats();
+      if (!stats[provider]) stats[provider] = { requests: 0, tokens: 0 };
+      stats[provider].requests++;
+      stats[provider].tokens += tokens;
+      await this.saveUsageStats(stats);
+      return stats[provider];
+    });
+  }
+
+  // ---------- cooldown (KV) ----------
+  async getCooldownUntil(provider) {
+    try {
+      const v = await this.env.API_USAGE?.get(`cooldown:${provider}`);
+      const until = Number(v);
+      return Number.isFinite(until) ? until : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  async setCooldown(provider, ms) {
+    try {
+      await this.env.API_USAGE?.put(`cooldown:${provider}`, String(Date.now() + ms), {
+        expirationTtl: Math.max(60, Math.ceil(ms / 1000))
       });
     } catch (e) {
-      console.error('Failed to save usage stats:', e);
+      console.error('Failed to save cooldown:', e && e.message);
     }
   }
 
-  // Increment usage counter
-  async trackUsage(provider, tokens = 1) {
-    const stats = await this.getUsageStats();
-    if (!stats[provider]) stats[provider] = { requests: 0, tokens: 0 };
-    stats[provider].requests++;
-    stats[provider].tokens += tokens;
-    await this.saveUsageStats(stats);
-    return stats[provider];
-  }
-
-  // Check if API is available (not rate limited)
-  async isAvailable(provider) {
-    const config = API_CONFIGS[provider];
-    const stats = await this.getUsageStats();
-    const used = stats[provider]?.requests || 0;
-
-    if (provider === 'groq' && used >= config.dailyLimit) {
+  // Is this provider usable right now? (daily soft limit + cooldown)
+  async isAvailable(provider, stats) {
+    const config = configFor(this.env, provider);
+    const s = stats || (await this.getUsageStats());
+    const used = s[provider]?.requests || 0;
+    if (used >= config.dailyLimit) {
       return { available: false, reason: `Daily limit reached (${used}/${config.dailyLimit})` };
     }
-    if (provider === 'gemini' && used >= config.rateLimit * 60) {
-      return { available: false, reason: `Rate limit reached (${used} requests today)` };
+    const until = await this.getCooldownUntil(provider);
+    if (until > Date.now()) {
+      return { available: false, reason: `Cooling down (${Math.ceil((until - Date.now()) / MIN)} min)` };
     }
-
     return { available: true };
   }
 
-  // Call Groq API
-  async callGroq(messages, options = {}) {
-    const config = API_CONFIGS.groq;
-    const model = options.model || config.models[0];
-
-    const response = await fetch(config.endpoint, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${this.apiKeys.groq}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model,
-        messages,
-        temperature: options.temperature || 0.7,
-        max_tokens: options.max_tokens || 1200
-      })
-    });
-
-    if (!response.ok) {
-      throw new Error(`Groq API error: ${response.status} ${response.statusText}`);
-    }
-
-    const data = await response.json();
-    return {
-      text: data.choices[0]?.message?.content || '',
-      tokens: data.usage?.total_tokens || 0,
-      provider: 'groq',
-      model
-    };
-  }
-
-  // Call Gemini API
-  async callGemini(messages, options = {}) {
-    const config = API_CONFIGS.gemini;
-    const model = options.model || config.models[0];
-
-    // Convert messages to Gemini format
-    const prompt = messages.map(m => m.content).join('\n\n');
-
-    const response = await fetch(
-      `${config.endpoint}/${model}:generateContent?key=${this.apiKeys.gemini}`,
-      {
+  // ---------- low level ----------
+  async _post(url, headers, body) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), this.timeoutMs);
+    try {
+      const res = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: {
-            temperature: options.temperature || 0.7,
-            maxOutputTokens: options.max_tokens || 1200
-          }
-        })
+        headers: { 'Content-Type': 'application/json', ...headers },
+        body: JSON.stringify(body),
+        signal: ctrl.signal
+      });
+      if (!res.ok) {
+        let detail = '';
+        try { detail = (await res.text()).replace(/\s+/g, ' ').slice(0, 140); } catch { /* ignore */ }
+        throw new ApiError(`${res.status} ${res.statusText || ''}${detail ? ' - ' + detail : ''}`.trim(), res.status);
       }
-    );
-
-    if (!response.ok) {
-      throw new Error(`Gemini API error: ${response.status} ${response.statusText}`);
+      return await res.json();
+    } catch (e) {
+      if (e && e.name === 'AbortError') throw new ApiError(`timeout (${this.timeoutMs} ms)`, 408);
+      throw e;
+    } finally {
+      clearTimeout(timer);
     }
-
-    const data = await response.json();
-    return {
-      text: data.candidates[0]?.content?.parts[0]?.text || '',
-      tokens: data.usageMetadata?.totalTokenCount || 0,
-      provider: 'gemini',
-      model
-    };
   }
 
-  // Call Hugging Face API
+  // Try the provider's models in order. Bad key / no credits stop immediately (other models will fail the same way).
+  async _tryModels(provider, options, run) {
+    const models = options.model ? [options.model] : configFor(this.env, provider).models;
+    const errors = [];
+    let lastStatus = 0;
+    for (const model of models) {
+      try {
+        return await run(model);
+      } catch (e) {
+        lastStatus = e.status || 0;
+        errors.push(`${model}: ${e.message}`);
+        if ([401, 402, 403, 408].includes(lastStatus)) break;
+      }
+    }
+    const err = new Error(errors.join(' | '));
+    err.status = lastStatus;
+    throw err;
+  }
+
+  _temp(options) { return options.temperature ?? 0.7; }
+  _max(options) { return options.max_tokens ?? 1200; }
+
+  // OpenAI-compatible body (Groq, Hugging Face router)
+  _openaiResult(data, provider, model) {
+    const choice = data.choices?.[0];
+    const text = choice?.message?.content || '';
+    if (!text.trim()) throw new ApiError(`empty response (finish=${choice?.finish_reason || '?'})`, 502);
+    return { text, tokens: data.usage?.total_tokens || 0, provider, model };
+  }
+
+  // ---------- providers ----------
+  async callGroq(messages, options = {}) {
+    const config = configFor(this.env, 'groq');
+    const headers = { Authorization: `Bearer ${this.apiKeys.groq}` };
+    return this._tryModels('groq', options, async (model) => {
+      const base = { model, messages, temperature: this._temp(options), max_tokens: this._max(options) };
+      const reasoning = /gpt-oss/i.test(model) ? { ...base, reasoning_effort: 'low' } : null;
+      let data;
+      try {
+        data = await this._post(config.endpoint, headers, reasoning || base);
+      } catch (e) {
+        if (reasoning && e.status === 400) data = await this._post(config.endpoint, headers, base);
+        else throw e;
+      }
+      return this._openaiResult(data, 'groq', model);
+    });
+  }
+
+  async callGemini(messages, options = {}) {
+    const config = configFor(this.env, 'gemini');
+    const headers = { 'x-goog-api-key': this.apiKeys.gemini };
+    const system = messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n');
+    const contents = messages
+      .filter((m) => m.role !== 'system')
+      .map((m) => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: String(m.content) }] }));
+    return this._tryModels('gemini', options, async (model) => {
+      const body = {
+        contents,
+        generationConfig: { temperature: this._temp(options), maxOutputTokens: this._max(options) }
+      };
+      if (system) body.systemInstruction = { parts: [{ text: system }] };
+      const data = await this._post(`${config.endpoint}/${model}:generateContent`, headers, body);
+      const cand = data.candidates?.[0];
+      const text = (cand?.content?.parts || []).map((p) => p.text || '').join('');
+      if (!text.trim()) {
+        throw new ApiError(`empty response (${cand?.finishReason || data.promptFeedback?.blockReason || '?'})`, 502);
+      }
+      return { text, tokens: data.usageMetadata?.totalTokenCount || 0, provider: 'gemini', model };
+    });
+  }
+
   async callHuggingFace(messages, options = {}) {
-    const config = API_CONFIGS.huggingface;
-    const model = options.model || config.models[0];
-
-    const prompt = messages.map(m => m.content).join('\n\n');
-
-    const response = await fetch(`${config.endpoint}/${model}`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${this.apiKeys.huggingface}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        inputs: prompt,
-        parameters: {
-          temperature: options.temperature || 0.7,
-          max_new_tokens: options.max_tokens || 1200,
-          return_full_text: false
-        }
-      })
+    const config = configFor(this.env, 'huggingface');
+    const headers = { Authorization: `Bearer ${this.apiKeys.huggingface}` };
+    return this._tryModels('huggingface', options, async (model) => {
+      const data = await this._post(config.endpoint, headers, {
+        model, messages, temperature: this._temp(options), max_tokens: this._max(options)
+      });
+      return this._openaiResult(data, 'huggingface', model);
     });
-
-    if (!response.ok) {
-      throw new Error(`Hugging Face API error: ${response.status} ${response.statusText}`);
-    }
-
-    const data = await response.json();
-    return {
-      text: data[0]?.generated_text || '',
-      tokens: 0, // HF doesn't always return token count
-      provider: 'huggingface',
-      model
-    };
   }
 
-  // Call Cohere API
   async callCohere(messages, options = {}) {
-    const config = API_CONFIGS.cohere;
-    const model = options.model || config.models[0];
-
-    const prompt = messages[messages.length - 1]?.content || '';
-
-    const response = await fetch(config.endpoint, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${this.apiKeys.cohere}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        model,
-        message: prompt,
-        temperature: options.temperature || 0.7,
-        max_tokens: options.max_tokens || 1200
-      })
+    const config = configFor(this.env, 'cohere');
+    const headers = { Authorization: `Bearer ${this.apiKeys.cohere}` };
+    const msgs = messages.map((m) => ({ role: m.role, content: String(m.content) }));
+    return this._tryModels('cohere', options, async (model) => {
+      const data = await this._post(config.endpoint, headers, {
+        model, messages: msgs, temperature: this._temp(options), max_tokens: this._max(options)
+      });
+      const parts = Array.isArray(data.message?.content) ? data.message.content : [];
+      const text = parts.filter((p) => p && p.type !== 'thinking').map((p) => p.text || '').join('') || data.text || '';
+      if (!text.trim()) throw new ApiError(`empty response (${data.finish_reason || '?'})`, 502);
+      return {
+        text,
+        tokens: data.usage?.tokens?.output_tokens || data.usage?.billed_units?.output_tokens || 0,
+        provider: 'cohere',
+        model
+      };
     });
-
-    if (!response.ok) {
-      throw new Error(`Cohere API error: ${response.status} ${response.statusText}`);
-    }
-
-    const data = await response.json();
-    return {
-      text: data.text || '',
-      tokens: data.meta?.tokens?.output_tokens || 0,
-      provider: 'cohere',
-      model
-    };
   }
 
-  // Main function: Try APIs in priority order with automatic fallback
+  // ---------- main entry ----------
   async generate(messages, options = {}) {
     const errors = [];
-    const providers = ['groq', 'gemini', 'huggingface', 'cohere'];
+    const stats = await this.getUsageStats(); // one KV read for the whole round
+    const callers = {
+      groq: (m, o) => this.callGroq(m, o),
+      gemini: (m, o) => this.callGemini(m, o),
+      huggingface: (m, o) => this.callHuggingFace(m, o),
+      cohere: (m, o) => this.callCohere(m, o)
+    };
 
-    for (const provider of providers) {
-      // Check availability
-      const availability = await this.isAvailable(provider);
-      if (!availability.available) {
-        errors.push(`${provider}: ${availability.reason}`);
-        continue;
-      }
-
-      // Skip if API key missing
+    for (const provider of this.order) {
       if (!this.apiKeys[provider]) {
         errors.push(`${provider}: API key not configured`);
         continue;
       }
-
+      const availability = await this.isAvailable(provider, stats);
+      if (!availability.available) {
+        errors.push(`${provider}: ${availability.reason}`);
+        continue;
+      }
       try {
-        let result;
-        switch (provider) {
-          case 'groq':
-            result = await this.callGroq(messages, options);
-            break;
-          case 'gemini':
-            result = await this.callGemini(messages, options);
-            break;
-          case 'huggingface':
-            result = await this.callHuggingFace(messages, options);
-            break;
-          case 'cohere':
-            result = await this.callCohere(messages, options);
-            break;
-        }
-
-        if (result.text && result.text.trim()) {
-          // Success! Track usage and return
-          await this.trackUsage(provider, result.tokens);
-          return {
-            text: result.text,
-            provider: result.provider,
-            model: result.model,
-            tokens: result.tokens,
-            errors
-          };
-        }
-
-        errors.push(`${provider}: Empty response`);
+        const result = await callers[provider](messages, options);
+        await this.trackUsage(provider, result.tokens);
+        return { text: result.text, provider: result.provider, model: result.model, tokens: result.tokens, errors };
       } catch (e) {
         errors.push(`${provider}: ${e.message}`);
+        if ([401, 403].includes(e.status)) await this.setCooldown(provider, COOLDOWN_MS.auth);
+        else if (e.status === 402) await this.setCooldown(provider, COOLDOWN_MS.credits);
+        else if (e.status === 429) await this.setCooldown(provider, COOLDOWN_MS.rate);
       }
     }
-
-    // All APIs failed
-    return {
-      text: '',
-      provider: null,
-      model: null,
-      tokens: 0,
-      errors
-    };
+    return { text: '', provider: null, model: null, tokens: 0, errors };
   }
 
-  // Get current status of all APIs
+  // ---------- dashboard ----------
   async getStatus() {
     const stats = await this.getUsageStats();
     const status = {};
-
-    for (const provider of Object.keys(API_CONFIGS)) {
-      const config = API_CONFIGS[provider];
+    for (const provider of this.order) {
+      const config = configFor(this.env, provider);
       const usage = stats[provider] || { requests: 0, tokens: 0 };
-      const availability = await this.isAvailable(provider);
-
+      const availability = await this.isAvailable(provider, stats);
       status[provider] = {
         name: config.name,
         available: availability.available,
         reason: availability.reason || 'Available',
         requests: usage.requests,
         tokens: usage.tokens,
-        limit: config.dailyLimit || config.rateLimit || 'Unlimited',
+        limit: config.dailyLimit,
+        models: config.models,
         hasApiKey: !!this.apiKeys[provider]
       };
     }
-
     return status;
   }
 }
 
-// Helper function for backward compatibility with existing code
+// Helper for backward compatibility
 export async function runAI(env, messages, opts = {}) {
   const manager = new MultiAPIManager(env);
   const result = await manager.generate(messages, opts);
-
   return {
     text: result.text,
     model: result.model || 'unknown',

@@ -1,19 +1,32 @@
-// Step 3: ready topic -> AI draft -> grounded fact-check -> copy check -> saved as DRAFT (or rejected with reason).
-import { runAI, modelList } from './ai.js';
-import { JUNK } from './trends.js';
-import { addMedia } from './media.js';
-import { groundedCheck as strictGroundedCheck, numbersNotIn, latinNotIn, expectedClaims } from './verify.js';
-import { preflight } from './playbook.js';
-import { extractFacts } from './facts.js';
-import { parkTopic } from './card.js';
+// Step 3 (v2): ready topic -> AI draft (written ONLY from the topic's sources) -> copy check (+1 rewrite retry)
+// -> number check -> real score -> image + thumbnail + SEO -> saved as DRAFT, topic marked 'drafted'.
+//
+// Fixes vs the deployed version:
+//  * score was hard-coded 90 -> now computed from copy overlap, longest copied run, unsourced numbers, length, structure
+//    (capped at 94 so nothing auto-publishes without a human or a full fact-check)
+//  * the prompt had NO sources (AI wrote from memory) -> sources are inside the prompt, with "do not invent" rules
+//  * copy check result was ignored -> now: 1 rewrite retry, then reject if still copied
+//  * topic stayed 'ready' after drafting (same topic drafted again and again) -> marked 'drafted' atomically with the insert
+//  * "undefined shabd" -> words / wordCount returned
+//  * slug was generated twice (SEO and DB had different slugs) -> generated once
+//  * daily limit counted a rolling 24h window -> now counts the IST calendar day (resets at 12:00 AM IST)
+//  * thumbnail / featured image / SEO meta columns were never saved -> saved; image_url + image_credit filled too
+//  * POST_LANG "eng" is understood as English
 
-// NEW: Import image and SEO modules
+import { runAI } from './ai.js';
+import { preflight } from './playbook.js';
 import { ImageGenerator } from './image-generator.js';
-import { ViralThumbnailGenerator, generateSVGThumbnail } from './viral-thumbnail-generator.js';
-import { SEOOptimizer, submitToIndexNow } from './seo-optimizer.js';
+import { ViralThumbnailGenerator } from './viral-thumbnail-generator.js';
+import { SEOOptimizer } from './seo-optimizer.js';
 
 const now = () => Math.floor(Date.now() / 1000);
-const CATS = ['India', 'Odisha', 'Business', 'Technology', 'Sports', 'Entertainment', 'Education', 'Jobs', 'Politics', 'World'];
+export const CATS = ['India', 'Odisha', 'Business', 'Technology', 'Sports', 'Entertainment', 'Education', 'Jobs', 'Politics', 'World'];
+
+// ---------- small helpers (exported so they can be unit-tested) ----------
+export const langOf = (env) => (/^en/i.test(String((env && env.POST_LANG) || '')) ? 'en' : 'hi');
+
+const IST = 19800;
+export const dayStartIST = (ts = now()) => Math.floor((ts + IST) / 86400) * 86400 - IST;
 
 const tok = (s) => String(s || '').toLowerCase().split(/[^\p{L}\p{M}\p{N}]+/u).filter(Boolean);
 const K = 6;
@@ -30,7 +43,7 @@ export function copyCheck(articleText, sourceTexts) {
   return { overlap: hit / total, longest: best ? best + K - 1 : 0 };
 }
 
-function parseDraft(text) {
+export function parseDraft(text) {
   const g = (k) => ((text.match(new RegExp('^\\s*' + k + ':\\s*(.*)$', 'mi')) || [])[1] || '').replace(/[*#]/g, '').trim();
   const bi = text.search(/^\s*BODY:\s*/mi);
   let body = bi >= 0 ? text.slice(bi).replace(/^\s*BODY:\s*/i, '') : '';
@@ -39,71 +52,238 @@ function parseDraft(text) {
   return { title: g('TITLE').replace(/["“”]/g, ''), summary: g('SUMMARY').replace(/["“”]/g, ''), category: g('CATEGORY'), tags: g('TAGS'), body };
 }
 
+const countWords = (s) => String(s || '').split(/\s+/).filter(Boolean).length;
+
+// ASCII slug; Hindi titles (no ASCII letters) get "post-xxxxx". Random suffix keeps it unique.
+export function slugify(text) {
+  const base = String(text || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60) || 'post';
+  return base + '-' + Math.random().toString(36).slice(2, 7);
+}
+
+// Numbers in the draft that do not appear anywhere in the sources (Devanagari digits and 1,00,000 style handled)
+const DEV = '०१२३४५६७८९';
+const normNum = (s) => String(s || '').replace(/[०-९]/g, (d) => String(DEV.indexOf(d))).replace(/(\d),(?=\d{2,3}\b)/g, '$1');
+const numsOf = (s) => normNum(s).match(/\d+(?:\.\d+)?/g) || [];
+export function ungroundedNumbers(text, sourceTexts, ignore = []) {
+  const have = new Set(numsOf(sourceTexts.join(' ')));
+  const bad = new Set();
+  for (const n of numsOf(text)) {
+    if (n.length < 2 && !n.includes('.')) continue; // single digits are too common to judge
+    if (have.has(n) || ignore.includes(n)) continue;
+    bad.add(n);
+  }
+  return [...bad];
+}
+
+// Real quality score (0-100). 95+ is only possible for a clean, sourced, well-structured draft.
+export function scoreDraft(m) {
+  let s = 100;
+  const notes = [];
+  const pct = (m.overlap || 0) * 100;
+  if (pct > 5) { s -= Math.min(40, Math.round((pct - 5) * 1.5)); notes.push(`Copy overlap ${Math.round(pct)}%`); }
+  if ((m.longest || 0) >= 20) { s -= m.longest >= 30 ? 20 : 10; notes.push(`${m.longest} shabd ki line sources se milti hai`); }
+  const ug = m.ungrounded || [];
+  if (ug.length) { s -= Math.min(18, ug.length * 3); notes.push(`Sources me nahi mile numbers: ${ug.slice(0, 5).join(', ')}`); }
+  if (m.words < 300) { s -= 20; notes.push(`Sirf ${m.words} shabd`); }
+  else if (m.words < 400) { s -= 8; notes.push(`${m.words} shabd (400+ behtar)`); }
+  else if (m.words > 1400) { s -= 5; notes.push('Bahut lamba'); }
+  if (!m.hasSummary) { s -= 5; notes.push('Summary nahi'); }
+  if ((m.headings || 0) < 2) { s -= 5; notes.push('Sub-headings kam'); }
+  if (!m.categoryOk) { s -= 3; notes.push('Category galat thi'); }
+  return { score: Math.max(0, Math.min(100, Math.round(s))), notes };
+}
+
 async function reject(env, topic, research, reason) {
   research.reject_reason = reason;
   await env.DB.prepare("UPDATE topics SET status='rejected',research=?,updated_at=? WHERE id=?").bind(JSON.stringify(research), now(), topic.id).run();
   return { ok: false, reason };
 }
 
-function slugify(text) {
-  return String(text).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60) + '-' + Math.random().toString(36).slice(2, 7);
+const hostOf = (u) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return ''; } };
+
+function buildMessages(env, topic, sources, feedback) {
+  const lang = langOf(env);
+  const langName = lang === 'en' ? 'English' : 'Hindi (Devanagari script)';
+  const today = new Date(Date.now() + IST * 1000).toISOString().slice(0, 10);
+  const system =
+    'You are a careful news editor for an Indian news website. You write ONLY from the SOURCES you are given. ' +
+    'Never invent facts, names, numbers, dates, quotes or claims that are not in the sources. ' +
+    'Never copy sentences: rewrite everything in your own words and your own sentence structure.';
+
+  const srcBlock = sources
+    .slice(0, 6)
+    .map((s, i) => `[${i + 1}] ${s.title || hostOf(s.url) || 'source'}${hostOf(s.url) ? ' (' + hostOf(s.url) + ')' : ''}\n${s.text.slice(0, 1800)}`)
+    .join('\n\n');
+
+  const user =
+    `Date: ${today}\nTopic: ${topic.query}\n\nSOURCES:\n${srcBlock}\n\n` +
+    `Write a news article in ${langName} about this topic using only the facts in the sources.\n` +
+    'Rules:\n' +
+    '- 450 to 700 words, 3 to 5 sub-headings written as lines starting with ##\n' +
+    '- No bullet points, no quotation marks, no markdown bold\n' +
+    '- Do not repeat 6 or more words in a row from any source\n' +
+    '- If the sources do not give a detail, leave it out (do not guess)\n' +
+    `- CATEGORY must be exactly one of: ${CATS.join(', ')}\n\n` +
+    'Return EXACTLY this format and nothing else:\n' +
+    'TITLE: (30 to 90 characters)\nSUMMARY: (110 to 150 characters)\nCATEGORY: \nTAGS: (5 comma separated tags)\nBODY:\n(article)' +
+    (feedback ? `\n\nIMPORTANT: ${feedback}` : '');
+
+  return [{ role: 'system', content: system }, { role: 'user', content: user }];
 }
 
 export async function writeOne(env, opts = {}) {
+  // ---- 1. daily limit: IST calendar day (resets 12:00 AM IST) ----
   const limit = Number(env.DAILY_POST_LIMIT || 4);
-  const made = (await env.DB.prepare('SELECT COUNT(*) c FROM posts WHERE created_at>?').bind(now() - 86400).first()).c;
+  const made = (await env.DB.prepare('SELECT COUNT(*) c FROM posts WHERE created_at>=?').bind(dayStartIST()).first()).c;
   if (made >= limit) return { ok: false, reason: `Aaj ki limit (${limit}) poori` };
 
-  const cands = (opts.topicId
+  // ---- 2. pick a ready topic that passes preflight and has real source text ----
+  const cands = opts.topicId
     ? (await env.DB.prepare('SELECT * FROM topics WHERE id=?').bind(opts.topicId).all()).results
-    : (await env.DB.prepare("SELECT * FROM topics WHERE status='ready' ORDER BY id LIMIT 8").all()).results);
+    : (await env.DB.prepare("SELECT * FROM topics WHERE status='ready' ORDER BY id LIMIT 8").all()).results;
 
-  let topic = null, research = {};
+  let topic = null, research = {}, sources = [];
   for (const c of cands) {
-    try { research = JSON.parse(c.research || '{}'); } catch { research = {}; }
-    const pf = preflight(c, research);
+    let r = {};
+    try { r = JSON.parse(c.research || '{}'); } catch { r = {}; }
+    const pf = preflight(c, r);
     if (!pf.ok) continue;
-    topic = c; break;
+    const srcs = (r.sources || [])
+      .map((s) => ({ ...s, text: String(s.text || s.content || s.snippet || s.summary || s.description || '').replace(/\s+/g, ' ').trim() }))
+      .filter((s) => s.text);
+    if (srcs.map((s) => s.text).join('').length < 400) continue; // not enough material: leave topic untouched
+    topic = c; research = r; sources = srcs;
+    break;
   }
   if (!topic) return { ok: false, reason: 'Koi kaam ka topic nahi mila' };
 
-  // AI Generation Logic (Simplified for stability)
-  const lang = env.POST_LANG || 'hi';
-  const prompt = `Write a detailed article in ${lang} about: ${topic.query}. \nTITLE: \nSUMMARY: \nCATEGORY: \nTAGS: \nBODY:`;
-  const aiRes = await runAI(env, [{ role: 'user', content: prompt }]);
-  if (!aiRes.text) return { ok: false, reason: 'AI failed to generate content' };
+  const sourceTexts = sources.map((s) => s.text);
+  const MAX_OVERLAP = Number(env.COPY_MAX_OVERLAP || 0.3);
+  const MAX_RUN = Number(env.COPY_MAX_RUN || 35);
+  const RETRY_OVERLAP = Number(env.COPY_RETRY_OVERLAP || 0.15);
+  const RETRY_RUN = Number(env.COPY_RETRY_RUN || 20);
+  const thisYear = String(new Date().getFullYear());
 
-  const draft = parseDraft(aiRes.text);
-  const { overlap, longest } = copyCheck(draft.body, (research.sources || []).map(s => s.text || ''));
+  // ---- 3. AI draft (at most one rewrite retry) ----
+  const attempt = async (feedback) => {
+    const ai = await runAI(env, buildMessages(env, topic, sources, feedback), { max_tokens: 6000, temperature: 0.6 });
+    if (!ai.text) return { ai, draft: null };
+    const draft = parseDraft(ai.text);
+    const cc = copyCheck(draft.body, sourceTexts);
+    const words = countWords(draft.body);
+    const ungrounded = ungroundedNumbers(`${draft.title} ${draft.summary} ${draft.body}`, sourceTexts, [thisYear]);
+    return { ai, draft, m: { ...cc, words, ungrounded } };
+  };
+  const usable = (a) => a.draft && a.draft.title && a.m.words >= 150;
 
-  // NEW: Image Generation
-  const imagePromises = [];
-  if (env.ENABLE_FEATURED_IMAGES !== 'false') {
-    imagePromises.push((async () => {
-      const imageGen = new ImageGenerator(env);
-      const img = await imageGen.generateFeaturedImage(draft.title, draft.category, topic.id);
-      if (img.success) draft.featured_image = img.featuredImage;
-    })());
+  let best = await attempt('');
+  if (!best.ai.text) {
+    return { ok: false, reason: `AI draft nahi bana: ${(best.ai.errors || []).join(' | ').slice(0, 300) || 'koi jawab nahi'}` };
   }
-  if (env.ENABLE_VIRAL_THUMBNAILS !== 'false') {
-    imagePromises.push((async () => {
-      const thumbGen = new ViralThumbnailGenerator(env);
-      const thumb = await thumbGen.generateViralThumbnail(draft.title, draft.category);
-      if (thumb.success) draft.thumbnail_image = thumb.imageUrl || thumb.imageData;
-      else draft.thumbnail_image = `data:image/svg+xml;base64,${btoa(generateSVGThumbnail(draft.title, draft.category, env.SITE_URL))}`;
-    })());
+  const needsRetry = (a) => !usable(a) || a.m.overlap > RETRY_OVERLAP || a.m.longest >= RETRY_RUN;
+  if (needsRetry(best)) {
+    const why = !usable(best)
+      ? 'Pichhla jawab adhura tha. Poora format follow karo: TITLE, SUMMARY, CATEGORY, TAGS, BODY (450+ shabd).'
+      : `Pichhla draft sources se ${Math.round(best.m.overlap * 100)}% milta tha (sabse lambi copied line ${best.m.longest} shabd). Poora naye shabdon aur alag vakya-rachna me dobara likho, sirf tathya wahi rakho.`;
+    const second = await attempt(why);
+    if (second.ai.text && usable(second) && (!usable(best) || second.m.overlap < best.m.overlap)) best = second;
   }
-  await Promise.allSettled(imagePromises);
+  if (!usable(best)) {
+    return { ok: false, reason: 'AI ka draft adhura aaya (title ya 150+ shabd nahi). Dobara try karo.' };
+  }
+  if (best.m.overlap > MAX_OVERLAP || best.m.longest >= MAX_RUN) {
+    return reject(env, topic, research, `Copy overlap ${Math.round(best.m.overlap * 100)}% zyada; ${best.m.longest} shabd ki line sources se mil rahi`);
+  }
 
-  // NEW: SEO Optimization
-  const seoOptimizer = new SEOOptimizer(env);
-  const seoMeta = seoOptimizer.generateSEOMetadata({ ...draft, slug: slugify(draft.title) });
-  const analysis = seoOptimizer.analyzeContent(draft);
-  draft.seo_score = analysis.score;
+  const { ai, draft, m } = best;
 
-  // Save to DB
-  await env.DB.prepare(`INSERT INTO posts (slug, title, summary, body, category, tags, score, seo_score, image_url, created_at, status) VALUES (?,?,?,?,?,?,?,?,?,?,'draft')`)
-    .bind(slugify(draft.title), draft.title, draft.summary, draft.body, draft.category, draft.tags, 90, draft.seo_score, draft.featured_image || '', now()).run();
+  // ---- 4. clean up fields ----
+  const category = CATS.find((c) => c.toLowerCase() === draft.category.toLowerCase());
+  draft.category = category || 'India';
+  draft.tags = draft.tags.split(/[,،]/).map((t) => t.trim()).filter(Boolean).slice(0, 8).join(', ') || String(topic.query || '');
+  if (!draft.summary) draft.summary = draft.body.replace(/##[^\n]*/g, '').trim().split(/(?<=[.!?।])\s/)[0].slice(0, 155);
+  const headings = (draft.body.match(/^## /gm) || []).length;
 
-  return { ok: true, title: draft.title, score: 90, seoScore: draft.seo_score };
+  const scored = scoreDraft({ ...m, hasSummary: !!draft.summary, headings, categoryOk: !!category });
+  const notes = scored.notes;
+  // Auto-publish (AUTO_APPROVE_MIN_SCORE, 95) must not trigger from overlap/number checks alone: an AI can still
+  // invent names or claims. Cap at 94 until a full fact-check module is wired in. Raise with SCORE_MAX if you want.
+  const score = Math.min(scored.score, Number(env.SCORE_MAX || 94));
+
+  // ---- 5. image + thumbnail (parallel, a failure never blocks the draft) ----
+  const slug = slugify(draft.title);
+  const imageGen = new ImageGenerator(env);
+  const thumbGen = new ViralThumbnailGenerator(env);
+  let img = null, thumb = null;
+  await Promise.allSettled([
+    env.ENABLE_FEATURED_IMAGES !== 'false'
+      ? imageGen.generateFeaturedImage(draft.title, draft.category, topic.id).then((r) => { img = r; })
+      : Promise.resolve(),
+    env.ENABLE_VIRAL_THUMBNAILS !== 'false'
+      ? thumbGen.generateViralThumbnail(draft.title, draft.category).then((r) => { thumb = r; })
+      : Promise.resolve()
+  ]);
+  const featured = img && img.success ? img.featuredImage : '';
+  const thumbnail = thumb && thumb.success ? thumb.imageUrl : '';
+
+  // ---- 6. SEO ----
+  const ts = now();
+  const seo = new SEOOptimizer(env);
+  const seoMeta = seo.generateSEOMetadata({ ...draft, slug, created_at: ts, updated_at: ts, featured_image: featured, thumbnail_image: thumbnail });
+  const analysis = seo.analyzeContent({ ...draft, featured_image: featured });
+
+  // ---- 7. save draft + mark topic, in ONE atomic batch ----
+  const row = {
+    slug,
+    title: draft.title,
+    summary: draft.summary,
+    body: draft.body,
+    category: draft.category,
+    tags: draft.tags,
+    lang: langOf(env),
+    image_url: featured,
+    image_credit: (img && img.credit) || '',
+    sources: JSON.stringify(sources.map(({ text, content, snippet, summary, description, ...rest }) => rest)),
+    score,
+    word_count: m.words,
+    created_at: ts,
+    updated_at: ts,
+    featured_image: featured,
+    thumbnail_image: thumbnail,
+    og_image: featured,
+    seo_score: analysis.score,
+    meta_description: seoMeta.metaDescription,
+    meta_keywords: seoMeta.keywords,
+    schema_json: seoMeta.schema
+  };
+  const cols = Object.keys(row);
+  let postId = null;
+  try {
+    const insert = env.DB.prepare(`INSERT INTO posts (${cols.join(',')},status) VALUES (${cols.map(() => '?').join(',')},'draft')`).bind(...cols.map((c) => row[c]));
+    const mark = env.DB.prepare("UPDATE topics SET status='drafted',updated_at=? WHERE id=?").bind(ts, topic.id);
+    const res = await env.DB.batch([insert, mark]);
+    postId = (res && res[0] && res[0].meta && res[0].meta.last_row_id) || null;
+  } catch (e) {
+    console.error('writeOne DB save failed:', e && e.message);
+    return { ok: false, reason: `Draft database me save nahi hua: ${String(e && e.message).slice(0, 200)}` };
+  }
+
+  console.log(JSON.stringify({ writeOne: 'ok', postId, provider: ai.provider, model: ai.model, score, words: m.words, overlap: Math.round(m.overlap * 100) }));
+
+  return {
+    ok: true,
+    postId,
+    title: draft.title,
+    score,
+    seoScore: analysis.score,
+    words: m.words,
+    wordCount: m.words,
+    copyOverlap: Math.round(m.overlap * 100),
+    longestRun: m.longest,
+    provider: ai.provider,
+    model: ai.model,
+    hasImages: { featured: !!featured, thumbnail: !!thumbnail },
+    imageProvider: (img && img.provider) || null,
+    warnings: notes
+  };
 }

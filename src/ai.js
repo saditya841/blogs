@@ -1,9 +1,8 @@
-// Modified ai.js - Wrapper to use Multi-API Manager when enabled
-// Falls back to Cloudflare Workers AI if disabled or external APIs fail
+// ai.js v2 — wrapper: Multi-API router first (when USE_MULTI_API=true), Cloudflare Workers AI as last backup.
+// Public API unchanged: runAI, modelList, thinkLess, RETRY_CAP, MAX_MODELS, MultiAPIManager.
 
 import { MultiAPIManager } from './multi-api-manager.js';
 
-// Original Cloudflare Workers AI code (kept as fallback)
 const FALLBACKS = ['@cf/zai-org/glm-4.7-flash', '@cf/google/gemma-4-26b-a4b-it', '@cf/openai/gpt-oss-20b', '@cf/qwen/qwen3.8-27b'];
 export const RETRY_CAP = 4500;
 export const MAX_MODELS = 2;
@@ -46,10 +45,11 @@ export function modelList(env) {
   return [env.AI_MODEL, ...FALLBACKS].filter(Boolean).filter((m, i, a) => a.indexOf(m) === i);
 }
 
-// Original Cloudflare Workers AI implementation (kept as fallback)
+// Cloudflare Workers AI (backup)
 async function runWorkersAI(env, messages, opts = {}) {
   const errors = [];
   let tokens = 0;
+  if (!env.AI) return { text: '', model: null, errors: ['workers-ai: AI binding missing'], tokens };
   const list = opts.models || modelList(env).slice(0, opts.maxModels || MAX_MODELS);
   for (const model of list) {
     try {
@@ -78,36 +78,38 @@ async function runWorkersAI(env, messages, opts = {}) {
   return { text: '', model: null, errors, tokens };
 }
 
-// NEW: Main runAI function with multi-API support
+// Main entry. Result always has: text, model, provider, errors, tokens.
 export async function runAI(env, messages, opts = {}) {
-  const useMultiAPI = env.USE_MULTI_API === 'true';
+  const multiErrors = [];
 
-  // Try Multi-API system first if enabled
-  if (useMultiAPI) {
+  if (env.USE_MULTI_API === 'true') {
     try {
       const manager = new MultiAPIManager(env);
       const result = await manager.generate(messages, opts);
+      multiErrors.push(...(result.errors || []));
 
       if (result.text && result.text.trim()) {
         return {
           text: result.text,
           model: `${result.provider}/${result.model}`,
           provider: result.provider,
-          errors: result.errors,
+          errors: multiErrors,
           tokens: result.tokens
         };
       }
-
-      // All external APIs failed, try Workers AI as fallback
-      console.log('Multi-API failed, falling back to Workers AI:', result.errors);
+      console.warn('Multi-API failed, using Workers AI backup:', multiErrors.join(' | '));
     } catch (e) {
-      console.error('Multi-API error, falling back to Workers AI:', e);
+      multiErrors.push(`multi-api: ${e.message}`);
+      console.error('Multi-API error, using Workers AI backup:', e && e.message);
     }
   }
 
-  // Fallback to original Cloudflare Workers AI
-  return await runWorkersAI(env, messages, opts);
+  const backup = await runWorkersAI(env, messages, opts);
+  return {
+    ...backup,
+    provider: backup.text ? 'workers-ai' : 'none',
+    errors: [...multiErrors, ...(backup.errors || [])]
+  };
 }
 
-// Export manager class for admin dashboard
 export { MultiAPIManager };
