@@ -1,0 +1,25 @@
+# Copy this file to ".dev.vars" for `npx wrangler dev`.
+# NEVER commit .dev.vars — it is git-ignored.
+# In production use: npx wrangler secret put NAME
+
+# Required for /admin
+ADMIN_PASSWORD=change-me-to-a-long-random-password
+
+# Optional AI providers (any one is enough; Workers AI needs no key)
+GROQ_API_KEY=
+GEMINI_API_KEY=
+HUGGINGFACE_API_KEY=
+COHERE_API_KEY=
+
+# Optional media
+PEXELS_API_KEY=
+YOUTUBE_API_KEY=
+
+# Optional: override any wrangler.toml var locally
+# ADSENSE_PUB=pub-0000000000000000
+# ADSENSE_SLOT=0000000000
+# ADSENSE_SLOT_BOTTOM=0000000000
+# SCORE_MAX=94
+# ENABLE_AI_EDITOR=true
+# EDITOR_MAX_ROUNDS=2
+# CARD_INDEX=
