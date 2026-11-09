@@ -11,9 +11,22 @@ async function getJson(url, ms = 9000) {
 }
 
 // ---- 1) free licensed photo from Wikimedia Commons (no key). Only CC BY / CC BY-SA / CC0 / public domain. ----
+// Relevance rule (fixes misleading photos): a short query like "DAC" or "Free Fire" is too ambiguous for a photo
+// library, so a real photo is used only when the file TITLE itself contains at least 2 topic words and the title +
+// description cover at least 60% of them. Otherwise we return null and an AI illustration is used instead.
+export const MIN_PHOTO_WORDS = 3;
+export const photoRelevant = (query, title, description = '') => {
+  const qw = [...new Set(words(query))];
+  if (qw.length < MIN_PHOTO_WORDS) return false;
+  const t = String(title || '').toLowerCase();
+  const all = `${t} ${String(description || '').toLowerCase()}`;
+  const inTitle = qw.filter((w) => t.includes(w)).length;
+  const inAll = qw.filter((w) => all.includes(w)).length;
+  return inTitle >= 2 && inAll / qw.length >= 0.6;
+};
 export async function findPhoto(query) {
-  const qw = words(query);
-  if (!qw.length) return null;
+  const qw = [...new Set(words(query))];
+  if (qw.length < MIN_PHOTO_WORDS) return null;
   const url = 'https://commons.wikimedia.org/w/api.php?action=query&format=json&origin=*&generator=search&gsrnamespace=6&gsrlimit=20'
     + '&gsrsearch=' + encodeURIComponent(query + ' filetype:bitmap')
     + '&prop=imageinfo&iiprop=url|size|mime|extmetadata&iiurlwidth=1200';
@@ -27,10 +40,11 @@ export async function findPhoto(query) {
     const md = ii.extmetadata || {};
     const lic = strip(md.LicenseShortName && md.LicenseShortName.value);
     if (!/^(CC BY|CC BY-SA|CC0|Public domain|PD)/i.test(lic) || /\b(NC|ND)\b/i.test(lic)) continue;
-    const text = ((p.title || '') + ' ' + strip(md.ImageDescription && md.ImageDescription.value)).toLowerCase();
-    if (qw.filter((w) => text.includes(w)).length / qw.length < 0.6) continue; // must really be about the topic
+    const desc = strip(md.ImageDescription && md.ImageDescription.value);
+    if (!photoRelevant(query, p.title, desc)) continue; // must really be about the topic
     const artist = strip(md.Artist && md.Artist.value).slice(0, 60) || 'Unknown';
-    return { url: ii.thumburl || ii.url, credit: `${artist} / ${lic} / Wikimedia Commons` };
+    // drop Wikimedia's tracking query string: the plain thumb URL is faster and does not expire
+    return { url: String(ii.thumburl || ii.url).split('?')[0], credit: `${artist} / ${lic} / Wikimedia Commons` };
   }
   return null;
 }
@@ -45,10 +59,11 @@ const CAT_Q = {
 const DEFAULT_Q = 'news studio background';
 const PEOPLE = /\b(man|men|woman|women|person|people|boy|girl|child|children|kid|kids|portrait|face|couple|family|worker|workers|student|students|crowd|businessman|businesswoman|lady|guy|player|players|athlete)\b/i;
 export const genericQuery = (category) => CAT_Q[category] || DEFAULT_Q;
-// Latin shabd (jaise "ipad mini") ho to wahi, warna category ki English query (Pexels Hindi nahi samajhta)
+// Latin shabd (jaise "ipad mini") ho to wahi, warna category ki English query (Pexels Hindi nahi samajhta).
+// One Latin word ("DAC") is too ambiguous for stock search -> use the category image instead.
 export const stockQuery = (query, category) => {
   const latin = String(query || '').match(/[A-Za-z]{3,}/g) || [];
-  return latin.length ? latin.slice(0, 4).join(' ') : genericQuery(category);
+  return latin.length >= 2 ? latin.slice(0, 4).join(' ') : genericQuery(category);
 };
 export async function findPexels(env, query, category) {
   if (!env || !env.PEXELS_API_KEY) return null;
@@ -62,7 +77,10 @@ export async function findPexels(env, query, category) {
   for (const p of j.photos || []) {
     const alt = String(p.alt || '');
     if (!alt || PEOPLE.test(alt)) continue;                       // alt nahi ya insaan = skip
-    if (!generic && !qw.some((w) => alt.toLowerCase().includes(w))) continue; // naam wali query: photo sach mein usi ke baare mein ho
+    if (!generic) {
+      const hits = qw.filter((w) => alt.toLowerCase().includes(w)).length;
+      if (!qw.length || hits / qw.length < 0.6) continue;         // photo sach mein usi ke baare mein ho
+    }
     const url2 = p.src && (p.src.large2x || p.src.large);
     if (url2) return { url: url2, credit: `${String(p.photographer || 'Pexels').slice(0, 60)} / Pexels` };
   }
@@ -106,7 +124,7 @@ export async function aiThumbnail(env, o = {}) {
   await env.DB.prepare('CREATE TABLE IF NOT EXISTS images (id TEXT PRIMARY KEY, mime TEXT, b64 TEXT, created_at INTEGER)').run();
   const id = Math.random().toString(36).slice(2, 8) + Math.random().toString(36).slice(2, 8);
   await env.DB.prepare('INSERT INTO images(id,mime,b64,created_at) VALUES(?,?,?,?)').bind(id, 'image/jpeg', b64, now()).run();
-  return { url: `${env.SITE_URL}/img/${id}.jpg`, credit: 'AI-generated thumbnail' };
+  return { url: `${env.SITE_URL}/img/${id}.jpg`, credit: 'AI-generated illustration' };
 }
 
 // ---- 3) YouTube video (needs a free YouTube Data API key in the secret YOUTUBE_API_KEY) ----

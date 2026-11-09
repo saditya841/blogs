@@ -1,9 +1,10 @@
-// Step 3 (v2): ready topic -> AI draft (written ONLY from the topic's sources) -> copy check (+1 rewrite retry)
-// -> number check -> real score -> image + thumbnail + SEO -> saved as DRAFT, topic marked 'drafted'.
+// Step 3 (v2): ready topic -> ZERO-token pre-read (language, relevance, facts, allowed numbers) -> AI draft
+// (written ONLY from the reading brief + topic's sources) -> copy check (+1 rewrite retry)
+// -> AI editor + fact-check pass (adds Vishleshan/Analysis + claim evidence, code verifies it) -> real score
+// -> image + thumbnail + SEO -> saved as DRAFT, topic marked 'drafted'.
 //
 // Fixes vs the deployed version:
 //  * score was hard-coded 90 -> now computed from copy overlap, longest copied run, unsourced numbers, length, structure
-//    (capped at 94 so nothing auto-publishes without a human or a full fact-check)
 //  * the prompt had NO sources (AI wrote from memory) -> sources are inside the prompt, with "do not invent" rules
 //  * copy check result was ignored -> now: 1 rewrite retry, then reject if still copied
 //  * topic stayed 'ready' after drafting (same topic drafted again and again) -> marked 'drafted' atomically with the insert
@@ -12,15 +13,19 @@
 //  * daily limit counted a rolling 24h window -> now counts the IST calendar day (resets at 12:00 AM IST)
 //  * thumbnail / featured image / SEO meta columns were never saved -> saved; image_url + image_credit filled too
 //  * POST_LANG "eng" is understood as English
+//  * editor.js now saves check_json, so the review page shows claim-by-claim evidence and auto-publish has a real gate
 
 import { runAI } from './ai.js';
+import { CATS } from './validate.js';
 import { preflight } from './playbook.js';
 import { ImageGenerator } from './image-generator.js';
 import { ViralThumbnailGenerator } from './viral-thumbnail-generator.js';
 import { SEOOptimizer } from './seo-optimizer.js';
+import { factCheck, hasAnalysisSection } from './editor.js';
+import { buildBrief } from './preread.js';
 
 const now = () => Math.floor(Date.now() / 1000);
-export const CATS = ['India', 'Odisha', 'Business', 'Technology', 'Sports', 'Entertainment', 'Education', 'Jobs', 'Politics', 'World'];
+export { CATS }; // single source of truth (validate.js)
 
 // ---------- small helpers (exported so they can be unit-tested) ----------
 export const langOf = (env) => (/^en/i.test(String((env && env.POST_LANG) || '')) ? 'en' : 'hi');
@@ -54,9 +59,9 @@ export function parseDraft(text) {
 
 const countWords = (s) => String(s || '').split(/\s+/).filter(Boolean).length;
 
-// ASCII slug; Hindi titles (no ASCII letters) get "post-xxxxx". Random suffix keeps it unique.
+// Readable slug; Hindi (Devanagari) titles are kept instead of turning into "post-xxxxx". Random suffix keeps it unique.
 export function slugify(text) {
-  const base = String(text || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60) || 'post';
+  const base = String(text || '').toLowerCase().normalize('NFC').replace(/[^\p{L}\p{M}\p{N}]+/gu, '-').replace(/^-|-$/g, '').slice(0, 70) || 'post';
   return base + '-' + Math.random().toString(36).slice(2, 7);
 }
 
@@ -90,6 +95,10 @@ export function scoreDraft(m) {
   if (!m.hasSummary) { s -= 5; notes.push('Summary nahi'); }
   if ((m.headings || 0) < 2) { s -= 5; notes.push('Sub-headings kam'); }
   if (!m.categoryOk) { s -= 3; notes.push('Category galat thi'); }
+  // Only penalise when the editor pass actually ran and told us something (undefined = old call/tests).
+  if (m.hasAnalysis === false) { s -= 6; notes.push('Vishleshan/analysis section nahi hai'); }
+  if (m.coverageLow === true) { s -= 6; notes.push('Fact-check ne kam claims diye'); }
+  if (m.verified === false) { s -= 12; notes.push('AI fact-check pass nahi hua'); }
   return { score: Math.max(0, Math.min(100, Math.round(s))), notes };
 }
 
@@ -101,25 +110,34 @@ async function reject(env, topic, research, reason) {
 
 const hostOf = (u) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return ''; } };
 
-function buildMessages(env, topic, sources, feedback) {
+function buildMessages(env, topic, sources, feedback, brief) {
   const lang = langOf(env);
   const langName = lang === 'en' ? 'English' : 'Hindi (Devanagari script)';
+  const analysisHeading = lang === 'en' ? '## Analysis' : '## विश्लेषण';
   const today = new Date(Date.now() + IST * 1000).toISOString().slice(0, 10);
   const system =
-    'You are a careful news editor for an Indian news website. You write ONLY from the SOURCES you are given. ' +
-    'Never invent facts, names, numbers, dates, quotes or claims that are not in the sources. ' +
-    'Never copy sentences: rewrite everything in your own words and your own sentence structure.';
+    'You are a careful news editor for an Indian news website. You write ONLY from the READING BRIEF and SOURCES you are given. ' +
+    'Never invent facts, names, numbers, dates, quotes or claims that are not in them. ' +
+    'Never copy sentences: rewrite everything in your own words and your own sentence structure. ' +
+    'If a detail is listed as missing, leave it out instead of guessing.';
 
   const srcBlock = sources
     .slice(0, 6)
-    .map((s, i) => `[${i + 1}] ${s.title || hostOf(s.url) || 'source'}${hostOf(s.url) ? ' (' + hostOf(s.url) + ')' : ''}\n${s.text.slice(0, 1800)}`)
+    .map((s, i) => `[${i + 1}] ${s.title || hostOf(s.url) || 'source'}${hostOf(s.url) ? ' (' + hostOf(s.url) + ')' : ''}\n${String(s.text || '').slice(0, 1800)}`)
     .join('\n\n');
 
+  const briefBlock = brief && brief.briefText
+    ? `READING BRIEF (already checked by code BEFORE writing - trust this):\n${brief.briefText}\n\n`
+    : '';
+
   const user =
-    `Date: ${today}\nTopic: ${topic.query}\n\nSOURCES:\n${srcBlock}\n\n` +
-    `Write a news article in ${langName} about this topic using only the facts in the sources.\n` +
+    `Date: ${today}\nTopic: ${topic.query}\n\n${briefBlock}SOURCES:\n${srcBlock}\n\n` +
+    `FIRST read the READING BRIEF and SOURCES above carefully. Only after that, write a news article in ${langName} about this topic using only those facts.\n` +
     'Rules:\n' +
-    '- 450 to 700 words, 3 to 5 sub-headings written as lines starting with ##\n' +
+    '- 500 to 750 words, 3 to 5 sub-headings written as lines starting with ##\n' +
+    `- One sub-heading must be exactly "${analysisHeading}". Its 2 to 3 paragraphs must explain what this news means, why it matters and what to watch next, using only facts from the sources\n` +
+    '- Use ONLY the numbers listed under "NUMBERS ALLOWED". Never write another number, date, name or place\n' +
+    '- If something is listed under "MISSING / DO NOT INVENT", leave it out completely\n' +
     '- No bullet points, no quotation marks, no markdown bold\n' +
     '- Do not repeat 6 or more words in a row from any source\n' +
     '- If the sources do not give a detail, leave it out (do not guess)\n' +
@@ -142,20 +160,36 @@ export async function writeOne(env, opts = {}) {
     ? (await env.DB.prepare('SELECT * FROM topics WHERE id=?').bind(opts.topicId).all()).results
     : (await env.DB.prepare("SELECT * FROM topics WHERE status='ready' ORDER BY id LIMIT 8").all()).results;
 
-  let topic = null, research = {}, sources = [];
+  let topic = null, research = {}, sources = [], brief = null, why = '';
   for (const c of cands) {
     let r = {};
     try { r = JSON.parse(c.research || '{}'); } catch { r = {}; }
     const pf = preflight(c, r);
-    if (!pf.ok) continue;
+    if (!pf.ok) { why = pf.reason || why; continue; }
     const srcs = (r.sources || [])
       .map((s) => ({ ...s, text: String(s.text || s.content || s.snippet || s.summary || s.description || '').replace(/\s+/g, ' ').trim() }))
       .filter((s) => s.text);
-    if (srcs.map((s) => s.text).join('').length < 400) continue; // not enough material: leave topic untouched
-    topic = c; research = r; sources = srcs;
+    if (srcs.map((s) => s.text).join('').length < 400) { why = `${c.query}: sources me text bahut kam hai`; continue; } // not enough material: leave topic untouched
+
+    // Step 2b: ZERO-token pre-read. If research already built a brief (new topics), trust it; old topics are
+    // read here again. A weak, foreign or unrelated source set stops the topic BEFORE any AI token is spent.
+    const b = (r.brief && r.brief.version === 1)
+      ? r.brief
+      : buildBrief(c.query, srcs, {
+        lang: langOf(env), nowSec: now(),
+        minSources: pf.minSources, maxAgeDays: pf.maxAgeDays, needDates: pf.needDates, label: pf.label
+      });
+    if (!b.ok) { why = b.reason || `${c.query}: pre-read fail hua`; continue; }
+
+    const goodSources = (Array.isArray(b.sources) && b.sources.length ? b.sources : srcs)
+      .map((s) => ({ ...s, text: String(s.text || s.snippet || '').replace(/\s+/g, ' ').trim() }))
+      .filter((s) => s.text);
+    if (!goodSources.length) { why = `${c.query}: pre-read ke baad koi source nahi bacha`; continue; }
+
+    topic = c; research = r; sources = goodSources; brief = b;
     break;
   }
-  if (!topic) return { ok: false, reason: 'Koi kaam ka topic nahi mila' };
+  if (!topic) return { ok: false, reason: why || 'Koi kaam ka topic nahi mila' };
 
   const sourceTexts = sources.map((s) => s.text);
   const MAX_OVERLAP = Number(env.COPY_MAX_OVERLAP || 0.3);
@@ -166,7 +200,7 @@ export async function writeOne(env, opts = {}) {
 
   // ---- 3. AI draft (at most one rewrite retry) ----
   const attempt = async (feedback) => {
-    const ai = await runAI(env, buildMessages(env, topic, sources, feedback), { max_tokens: 6000, temperature: 0.6 });
+    const ai = await runAI(env, buildMessages(env, topic, sources, feedback, brief), { max_tokens: 6000, temperature: 0.6 });
     if (!ai.text) return { ai, draft: null };
     const draft = parseDraft(ai.text);
     const cc = copyCheck(draft.body, sourceTexts);
@@ -202,13 +236,72 @@ export async function writeOne(env, opts = {}) {
   draft.category = category || 'India';
   draft.tags = draft.tags.split(/[,،]/).map((t) => t.trim()).filter(Boolean).slice(0, 8).join(', ') || String(topic.query || '');
   if (!draft.summary) draft.summary = draft.body.replace(/##[^\n]*/g, '').trim().split(/(?<=[.!?।])\s/)[0].slice(0, 155);
-  const headings = (draft.body.match(/^## /gm) || []).length;
 
-  const scored = scoreDraft({ ...m, hasSummary: !!draft.summary, headings, categoryOk: !!category });
+  // ---- 4b. AI editor + fact-check (quality gate before saving) ----
+  // The editor adds an original Vishleshan/Analysis section and lists every factual claim with its source line.
+  // Plain code decides whether the evidence really exists. If it fails, the draft is saved for a human, never
+  // silently published. Set ENABLE_AI_EDITOR=false only if you are debugging without AI.
+  const srcDates = sources.map((s) => Number(s.date) || 0).filter(Boolean);
+  const newestSource = srcDates.length ? Math.max(...srcDates) : 0;
+  const editorOff = ['false', '0', 'off', 'no'].includes(String(env.ENABLE_AI_EDITOR ?? '').trim().toLowerCase());
+  let fc;
+  if (editorOff) {
+    fc = {
+      verified: false, coverageLow: true, unsupportedCount: 1, claims: 0, supported: 0, fixRounds: 0,
+      overlap: m.overlap, newest_source: newestSource, claimList: [], numbersNotInSources: [],
+      latinNotInSources: [], hasAnalysis: hasAnalysisSection(draft.body), error: 'ENABLE_AI_EDITOR=false'
+    };
+  } else {
+    fc = await factCheck(env, draft, sources, {
+      lang: langOf(env),
+      maxRounds: Number(env.EDITOR_MAX_ROUNDS ?? 2),
+      newestSource,
+      overlap: m.overlap
+    });
+  }
+  if (fc && fc.body) draft.body = fc.body;
+
+  const finalCc = copyCheck(draft.body, sourceTexts);
+  if (finalCc.overlap > MAX_OVERLAP || finalCc.longest >= MAX_RUN) {
+    return reject(env, topic, research, `Editor ke baad copy overlap ${Math.round(finalCc.overlap * 100)}% zyada; ${finalCc.longest} shabd ki line sources se mil rahi`);
+  }
+  const words = countWords(draft.body);
+  const finalUngrounded = ungroundedNumbers(`${draft.title} ${draft.summary} ${draft.body}`, sourceTexts, [thisYear]);
+  const headings = (draft.body.match(/^## /gm) || []).length;
+  const hasAnalysis = hasAnalysisSection(draft.body);
+
+  const scored = scoreDraft({
+    ...m,
+    overlap: finalCc.overlap,
+    longest: finalCc.longest,
+    ungrounded: finalUngrounded,
+    words,
+    hasSummary: !!draft.summary,
+    headings,
+    categoryOk: !!category,
+    hasAnalysis,
+    verified: fc.verified,
+    coverageLow: fc.coverageLow
+  });
   const notes = scored.notes;
-  // Auto-publish (AUTO_APPROVE_MIN_SCORE, 95) must not trigger from overlap/number checks alone: an AI can still
-  // invent names or claims. Cap at 94 until a full fact-check module is wired in. Raise with SCORE_MAX if you want.
+  // Auto-publish is still capped at 94 by default, even when the fact-check passes. A human should approve the
+  // first months of content; raise SCORE_MAX only after you trust the pipeline and have real traffic.
   const score = Math.min(scored.score, Number(env.SCORE_MAX || 94));
+  const fcMeta = { ...(fc || {}) };
+  delete fcMeta.body;
+  const prereadMeta = brief ? {
+    ok: !!brief.ok,
+    quality: brief.quality || 0,
+    lang: brief.lang || langOf(env),
+    mixed: !!brief.mixed,
+    usable: (brief.stats && brief.stats.usable) || 0,
+    fullText: (brief.stats && brief.stats.fullText) || 0,
+    facts: (brief.stats && brief.stats.facts) || 0,
+    agreed: (brief.stats && brief.stats.agreed) || 0,
+    newestAgeHours: brief.stats ? brief.stats.newestAgeHours : null,
+    dropped: (brief.dropped || []).length,
+    reason: brief.reason || ''
+  } : null;
 
   // ---- 5. image + thumbnail (parallel, a failure never blocks the draft) ----
   const slug = slugify(draft.title);
@@ -245,7 +338,8 @@ export async function writeOne(env, opts = {}) {
     image_credit: (img && img.credit) || '',
     sources: JSON.stringify(sources.map(({ text, content, snippet, summary, description, ...rest }) => rest)),
     score,
-    word_count: m.words,
+    word_count: words,
+    check_json: JSON.stringify({ ...fcMeta, overlap: finalCc.overlap, newest_source: newestSource, lang: langOf(env), preread: prereadMeta }),
     created_at: ts,
     updated_at: ts,
     featured_image: featured,
@@ -268,7 +362,7 @@ export async function writeOne(env, opts = {}) {
     return { ok: false, reason: `Draft database me save nahi hua: ${String(e && e.message).slice(0, 200)}` };
   }
 
-  console.log(JSON.stringify({ writeOne: 'ok', postId, provider: ai.provider, model: ai.model, score, words: m.words, overlap: Math.round(m.overlap * 100) }));
+  console.log(JSON.stringify({ writeOne: 'ok', postId, provider: ai.provider, model: ai.model, score, words, overlap: Math.round(finalCc.overlap * 100), verified: !!fc.verified, claims: fc.claims || 0 }));
 
   return {
     ok: true,
@@ -276,12 +370,15 @@ export async function writeOne(env, opts = {}) {
     title: draft.title,
     score,
     seoScore: analysis.score,
-    words: m.words,
-    wordCount: m.words,
-    copyOverlap: Math.round(m.overlap * 100),
-    longestRun: m.longest,
+    words,
+    wordCount: words,
+    copyOverlap: Math.round(finalCc.overlap * 100),
+    longestRun: finalCc.longest,
     provider: ai.provider,
     model: ai.model,
+    verified: !!fc.verified,
+    claims: fc.claims || 0,
+    supported: fc.supported || 0,
     hasImages: { featured: !!featured, thumbnail: !!thumbnail },
     imageProvider: (img && img.provider) || null,
     warnings: notes

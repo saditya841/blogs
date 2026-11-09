@@ -1,8 +1,7 @@
 // facts.js — ZERO-token: sources ke sentences mein se wo facts chunta hai jo kam se kam 2 alag outlet mein milte hain.
 // Idea: do alag outlet ek hi baat likhein (same tareekh/sankhya + milte-julte shabd) to wo fact bharose layak hai.
 // Koi AI nahi, koi internet nahi. Pure function.
-import { tok, numbersIn, devDigits } from './verify.js';
-import { looksInjected } from './trends.js';
+import { tok, numbersIn, devDigits, looksInjected } from './verify.js';
 
 const MONTHS = {
   jan: 1, january: 1, feb: 2, february: 2, mar: 3, march: 3, apr: 4, april: 4, may: 5, jun: 6, june: 6, jul: 7, july: 7,

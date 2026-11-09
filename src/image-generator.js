@@ -1,20 +1,10 @@
-// Image Generator v2 — featured image for every article.
-// Order: 1) Pexels stock photo (needs free PEXELS_API_KEY)  2) Pollinations AI (free, validated)  3) DEFAULT_IMAGE_URL.
-// Fixes vs v1: removed the retired Unsplash Source fallback, Pollinations result is verified (real image, timeout),
-// POST_LANG "eng"/"en" understood, R2 public URL fixed, no dependency on og-image.vercel.app.
+// Image Generator v3 — featured image for every article.
+// Order: 1) Pexels stock photo (free key, relevance-checked)  2) Workers AI illustration stored in D1 (stable URL)
+//        3) DEFAULT_IMAGE_URL.
+// v3: the Pollinations hotlink is no longer used by default (it broke when their service was slow/rate-limited);
+//     the AI illustration now comes from the same code as media.js, so one article never gets two image systems.
 
-const STOCK_KEYWORDS = {
-  Politics: 'parliament government india',
-  Sports: 'stadium sports india',
-  Entertainment: 'cinema film camera',
-  Business: 'business office india',
-  Technology: 'technology computer',
-  India: 'india city street',
-  World: 'world globe city',
-  Education: 'students classroom books',
-  Jobs: 'office workspace career',
-  Odisha: 'odisha temple india'
-};
+import { aiThumbnail, findPexels } from './media.js';
 
 const STYLES = {
   Politics: 'professional news photo, parliament, serious tone',
@@ -31,26 +21,9 @@ const STYLES = {
 
 export const isEnglish = (env) => /^en/i.test(String((env && env.POST_LANG) || ''));
 
-const hash = (s) => {
-  let h = 0;
-  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
-  return h;
-};
-
 export class ImageGenerator {
   constructor(env) {
     this.env = env || {};
-    this.timeoutMs = Number(this.env.IMAGE_TIMEOUT_MS) || 25000;
-  }
-
-  async _fetch(url, init = {}) {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), this.timeoutMs);
-    try {
-      return await fetch(url, { ...init, signal: ctrl.signal });
-    } finally {
-      clearTimeout(timer);
-    }
   }
 
   // Prompt for AI image (never asks for text inside the picture)
@@ -61,71 +34,15 @@ export class ImageGenerator {
     return `Professional news photograph for ${lang} article: "${cleanTitle}". Style: ${styleGuide}. High quality, photorealistic, suitable for news website banner. 16:9 aspect ratio. No text overlay.`;
   }
 
-  // 1) Stock photo from Pexels
+  // 1) Stock photo from Pexels — one shared, relevance-checked implementation (media.js)
   async generateWithPexels(title, category) {
-    const key = this.env.PEXELS_API_KEY;
-    if (!key) return { success: false, error: 'PEXELS_API_KEY not set', provider: 'pexels' };
+    if (!this.env.PEXELS_API_KEY) return { success: false, error: 'PEXELS_API_KEY not set', provider: 'pexels' };
     try {
-      const latin = (String(title || '').match(/[A-Za-z]{4,}/g) || []).slice(0, 3).join(' ');
-      const query = latin.split(' ').length >= 2 ? latin : STOCK_KEYWORDS[category] || 'india news';
-      const url = `https://api.pexels.com/v1/search?query=${encodeURIComponent(query)}&per_page=15&orientation=landscape`;
-      const res = await this._fetch(url, { headers: { Authorization: key } });
-      if (!res.ok) throw new Error(`Pexels API error: ${res.status}`);
-      const data = await res.json();
-      const photos = Array.isArray(data.photos) ? data.photos : [];
-      if (!photos.length) throw new Error('no photos found');
-      const photo = photos[hash(String(title || '')) % photos.length];
-      const src = photo.src?.large2x || photo.src?.large || photo.src?.original;
-      if (!src) throw new Error('photo has no src');
-      return {
-        success: true,
-        imageUrl: src,
-        provider: 'pexels',
-        credit: `Photo: ${photo.photographer || 'Pexels'} / Pexels`
-      };
+      const r = await findPexels(this.env, title, category);
+      if (!r) throw new Error('koi relevant photo nahi mili');
+      return { success: true, imageUrl: r.url, provider: 'pexels', credit: r.credit };
     } catch (e) {
       return { success: false, error: e.message, provider: 'pexels' };
-    }
-  }
-
-  // 2) AI image from Pollinations (free). The image is really fetched once, so a broken link is never saved.
-  async generateWithPollinations(prompt, options = {}, postId = 'x') {
-    const width = options.width || 1200;
-    const height = options.height || 630;
-    const params = new URLSearchParams({
-      width: String(width),
-      height: String(height),
-      seed: String(options.seed ?? Math.floor(Math.random() * 1000000)),
-      model: 'flux',
-      nologo: 'true'
-    });
-    const imageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?${params}`;
-    try {
-      const response = await this._fetch(imageUrl);
-      if (!response.ok) throw new Error(`Pollinations API error: ${response.status}`);
-      const type = (response.headers && response.headers.get && response.headers.get('content-type')) || '';
-      if (!/^image\//i.test(type)) throw new Error(`not an image (${type || 'no content-type'})`);
-
-      let finalUrl = imageUrl;
-      if (this.env.R2_BUCKET && this.env.R2_PUBLIC_BASE) {
-        const stored = await this.storeImage(await response.blob(), postId);
-        if (stored) finalUrl = stored;
-      }
-      return { success: true, imageUrl: finalUrl, provider: 'pollinations' };
-    } catch (e) {
-      return { success: false, error: e.message, provider: 'pollinations' };
-    }
-  }
-
-  // Optional: keep a copy in R2 (needs R2_BUCKET binding + public bucket URL in R2_PUBLIC_BASE)
-  async storeImage(imageBlob, postId) {
-    if (!(this.env.R2_BUCKET && this.env.R2_PUBLIC_BASE)) return null;
-    try {
-      const key = `images/${postId}/${Date.now()}.jpg`;
-      await this.env.R2_BUCKET.put(key, imageBlob, { httpMetadata: { contentType: imageBlob.type || 'image/jpeg' } });
-      return `${String(this.env.R2_PUBLIC_BASE).replace(/\/+$/, '')}/${key}`;
-    } catch {
-      return null;
     }
   }
 
@@ -140,12 +57,12 @@ export class ImageGenerator {
     }
     if (this.env.PEXELS_API_KEY) errors.push(`Pexels: ${pexels.error}`);
 
-    if (this.env.ENABLE_AI_IMAGES !== 'false') {
-      const poll = await this.generateWithPollinations(prompt, { width: 1200, height: 630 }, postId);
-      if (poll.success) {
-        return { success: true, featuredImage: poll.imageUrl, thumbnailImage: poll.imageUrl, provider: 'pollinations', credit: '', prompt, errors };
+    // AI illustration: Workers AI draws the background and we store it in D1 -> a stable /img/<id>.jpg URL.
+    if (this.env.ENABLE_AI_IMAGES !== 'false' && this.env.AI) {
+      const ai = await aiThumbnail(this.env, { query: title, category }).catch((e) => { errors.push(`Workers AI: ${String(e.message).slice(0, 80)}`); return null; });
+      if (ai && ai.url) {
+        return { success: true, featuredImage: ai.url, thumbnailImage: ai.url, provider: 'workers-ai', credit: ai.credit, prompt, errors };
       }
-      errors.push(`Pollinations: ${poll.error}`);
     }
 
     if (this.env.DEFAULT_IMAGE_URL) {

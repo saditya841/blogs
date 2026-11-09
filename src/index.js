@@ -1,12 +1,12 @@
 // Virall - Cloudflare-only blog. Step 1: SEO site + D1 + admin. Step 2: Trends -> topics -> research.
-import { collectTopics, researchPending } from './trends.js';
+import { collectTopics, researchPending, researchTopic } from './trends.js';
 import { runAI } from './ai.js';
 import { writeOne } from './writer.js';
 import { cardOne } from './card.js';
 import { writeCardPost, renderCardPage, renderCardsList } from './cardpost.js';
 import { addMedia, makeHook } from './media.js';
 import { validatePost } from './validate.js';
-import { handleAPIStatus } from './admin-api-status.js'; // <-- LINE 1 ADDED
+import { handleAPIStatus } from './admin-api-status.js';
 
 const now = () => Math.floor(Date.now() / 1000);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -18,6 +18,16 @@ const HDR = { 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'strict-or
 const html = (s, status = 200, cache = true) => new Response(s, { status, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': cache && status === 200 ? 'public, max-age=300, s-maxage=600' : 'no-store', ...HDR } });
 const xml = (s) => new Response(s, { headers: { 'Content-Type': 'application/xml; charset=utf-8', 'Cache-Control': 'public, max-age=600', ...HDR } });
 const go = (loc, headers = {}) => new Response(null, { status: 303, headers: { Location: loc, 'Cache-Control': 'no-store', ...headers } });
+// Accepts "pub-...", "ca-pub-..." or just the digits, and returns "pub-...".
+// The ad script needs "ca-pub-..." while ads.txt needs "pub-...", so one format is stored.
+export const adsPub = (env) => {
+  const v = String((env && env.ADSENSE_PUB) || '').trim();
+  if (!v) return '';
+  const m = v.match(/^(?:ca-)?pub-(\d+)$/i);
+  if (m) return 'pub-' + m[1];
+  if (/^\d+$/.test(v)) return 'pub-' + v;
+  return v;
+};
 
 const CSS = `*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;font:17px/1.75 system-ui,-apple-system,'Segoe UI','Noto Sans Devanagari',sans-serif;background:#f6f7f9;color:#1b1b1b}
 a{color:#0b3d91}.w{max-width:780px;margin:0 auto;padding:14px}header{background:#0b3d91}header .w{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px}
@@ -30,6 +40,7 @@ article h1{font-size:28px;line-height:1.3;margin:8px 0}article h2{font-size:22px
 .vid{position:relative;aspect-ratio:16/9}iframe{position:absolute;inset:0;width:100%;height:100%;border:0;border-radius:10px}.pg{display:flex;justify-content:space-between;margin:16px 0}
 input,textarea,button,select{width:100%;padding:10px;margin:6px 0;font:inherit;border:1px solid #bbb;border-radius:8px}button{background:#0b3d91;color:#fff;border:0;cursor:pointer}button.r{background:#b3261e}button.g{background:#2e7d32}button.o{background:#6b6b6b}
 .tag{display:inline-block;padding:1px 8px;border-radius:99px;background:#eee;font-size:12px}footer{color:#666;font-size:14px;padding:22px 14px;text-align:center}footer a{margin:0 6px}form.s{display:flex;gap:6px}form.s input{margin:0}form.s button{width:auto}
+.adwrap{margin:20px 0;min-height:90px}
 .poster{position:relative;display:flex;flex-direction:column;justify-content:space-between;gap:10px;aspect-ratio:16/9;padding:14px 16px;color:#fff;overflow:hidden}.poster:before{content:"";position:absolute;inset:0;background:radial-gradient(circle at 88% 12%,rgba(255,255,255,.25),transparent 45%),radial-gradient(circle at 8% 100%,rgba(0,0,0,.35),transparent 55%)}.poster>*{position:relative}
 .poster .pc{align-self:flex-start;background:rgba(255,255,255,.2);border:1px solid rgba(255,255,255,.5);border-radius:99px;padding:2px 12px;font-size:12px;font-weight:700;letter-spacing:.6px;text-transform:uppercase}
 .poster .pt{font-weight:800;font-size:clamp(17px,3.4vw,22px);line-height:1.35;display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden;text-shadow:0 2px 10px rgba(0,0,0,.3)}
@@ -42,15 +53,16 @@ const jsonld = (o) => `<script type="application/ld+json">${JSON.stringify(o).re
 
 function layout(env, o, body, cats = []) {
   const site = env.SITE_URL, name = env.SITE_NAME || 'Virall', title = o.title === name ? name : `${o.title} | ${name}`;
-  const adHead = env.ADSENSE_PUB && !o.noAdScript
-    ? `<meta name="google-adsense-account" content="ca-${esc(env.ADSENSE_PUB)}"><script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-${esc(env.ADSENSE_PUB)}" crossorigin="anonymous"></script>` : '';
+  const pub = adsPub(env);
+  const adHead = pub && !o.noAdScript
+    ? `<meta name="google-adsense-account" content="ca-${esc(pub)}"><script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-${esc(pub)}" crossorigin="anonymous"></script>` : '';
   return `<!doctype html><html lang="${esc(o.lang || 'hi')}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${esc(title)}</title><meta name="description" content="${esc((o.desc || env.SITE_TAGLINE || '').slice(0, 160))}">
 ${o.canonical ? `<link rel="canonical" href="${esc(o.canonical)}">` : ''}${o.prev ? `<link rel="prev" href="${esc(o.prev)}">` : ''}${o.next ? `<link rel="next" href="${esc(o.next)}">` : ''}
 <meta name="robots" content="${o.noindex ? 'noindex,nofollow' : 'index,follow,max-image-preview:large,max-snippet:-1'}">
-<meta property="og:site_name" content="${esc(name)}"><meta property="og:type" content="${o.type || 'website'}"><meta property="og:title" content="${esc(o.title)}"><meta property="og:description" content="${esc((o.desc || '').slice(0, 200))}">
-${o.canonical ? `<meta property="og:url" content="${esc(o.canonical)}">` : ''}${o.image ? `<meta property="og:image" content="${esc(o.image)}">` : ''}
-<meta name="twitter:card" content="${o.image ? 'summary_large_image' : 'summary'}"><meta name="twitter:title" content="${esc(o.title)}">
+<meta property="og:site_name" content="${esc(name)}"><meta property="og:type" content="${o.type || 'website'}"><meta property="og:locale" content="${esc(o.lang === 'en' ? 'en_IN' : 'hi_IN')}"><meta property="og:title" content="${esc(o.title)}"><meta property="og:description" content="${esc((o.desc || '').slice(0, 200))}">
+${o.canonical ? `<meta property="og:url" content="${esc(o.canonical)}">` : ''}${o.image ? `<meta property="og:image" content="${esc(o.image)}"><meta property="og:image:alt" content="${esc(o.title)}">` : ''}${o.published ? `<meta property="article:published_time" content="${esc(o.published)}">` : ''}${o.modified ? `<meta property="article:modified_time" content="${esc(o.modified)}">` : ''}
+<meta name="twitter:card" content="${o.image ? 'summary_large_image' : 'summary'}"><meta name="twitter:title" content="${esc(o.title)}"><meta name="twitter:description" content="${esc((o.desc || '').slice(0, 200))}">
 <link rel="alternate" type="application/rss+xml" title="${esc(name)}" href="${site}/feed.xml"><meta name="theme-color" content="#0b3d91">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='20' fill='%230b3d91'/%3E%3Ctext x='50' y='70' font-size='62' text-anchor='middle' fill='white' font-family='sans-serif' font-weight='700'%3EV%3C/text%3E%3C/svg%3E">
 <style>${CSS}</style>${adHead}${o.ld || ''}</head><body>
@@ -74,12 +86,20 @@ function renderBody(text, adHtml = '') {
 }
 const words = (t) => String(t || '').trim().split(/\s+/).filter(Boolean).length;
 const ytId = (u) => { const m = String(u || '').match(/(?:youtu\.be\/|v=|embed\/)([\w-]{11})/); return m ? m[1] : null; };
-const slugify = (t) => (String(t).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60) || 'post') + '-' + Math.random().toString(36).slice(2, 7);
+// Readable URL slug. Hindi (Devanagari) titles used to become "post-xxxxx", which is bad for SEO:
+// Google supports Unicode URLs, so we keep the letters of any script and only replace punctuation.
+const slugify = (t) => (String(t).toLowerCase().normalize('NFC').replace(/[^\p{L}\p{M}\p{N}]+/gu, '-').replace(/^-|-$/g, '').slice(0, 70) || 'post') + '-' + Math.random().toString(36).slice(2, 7);
+const postHref = (slug) => '/post/' + encodeURIComponent(String(slug || ''));
 const dec = (s) => { try { return decodeURIComponent(s); } catch { return null; } }; // broken %-encoding must be a 404, not a crash
 const pageOf = (url) => Math.max(1, Math.floor(Number(url.searchParams.get('page'))) || 1);
 const okImg = (u) => (String(u || '').startsWith('https://') ? u : null);
-const adSlot = (env) => (env.ADSENSE_PUB && env.ADSENSE_SLOT
-  ? `<ins class="adsbygoogle" style="display:block" data-ad-client="ca-${esc(env.ADSENSE_PUB)}" data-ad-slot="${esc(env.ADSENSE_SLOT)}" data-ad-format="auto" data-full-width-responsive="true"></ins><script>(adsbygoogle=window.adsbygoogle||[]).push({});</script>` : '');
+// Ad unit. `key` lets us use a second slot (e.g. ADSENSE_SLOT_BOTTOM) and fall back to ADSENSE_SLOT.
+const adSlot = (env, key = 'ADSENSE_SLOT') => {
+  const pub = adsPub(env), slot = env[key] || env.ADSENSE_SLOT;
+  return pub && slot
+    ? `<ins class="adsbygoogle" style="display:block" data-ad-client="ca-${esc(pub)}" data-ad-slot="${esc(slot)}" data-ad-format="auto" data-full-width-responsive="true"></ins><script>(adsbygoogle=window.adsbygoogle||[]).push({});</script>`
+    : '';
+};
 
 const GRAD = ['#0b3d91,#3b82f6', '#7c2d12,#f97316', '#14532d,#22c55e', '#581c87,#a855f7', '#134e4a,#14b8a6', '#9f1239,#f43f5e'];
 const cover = (r, hero = false) => {
@@ -94,7 +114,7 @@ const thumb = (r, big = false) => {
   const hook = `${esc(w.slice(0, -n).join(' '))} <b>${esc(w.slice(-n).join(' '))}</b>`;
   return `<div class="tb${big ? ' big' : ''}"><img ${big ? 'class="hero" width="1200" height="675" fetchpriority="high"' : 'loading="lazy" width="640" height="360"'} src="${esc(r.image_url)}" alt="${esc(r.title)}">${r.category ? `<span class="tc">${esc(r.category)}</span>` : ''}<div class="th">${hook}</div></div>`;
 };
-const card = (r) => `<div class="card">${r.image_url ? `<a href="/post/${r.slug}">${aiImg(r.image_url) ? thumb(r) : `<img loading="lazy" width="640" height="360" src="${esc(r.image_url)}" alt="${esc(r.title)}">`}</a>` : `<a href="/post/${r.slug}">${cover(r)}</a>`}<div class="p">${r.category ? `<a class="chip" href="/category/${encodeURIComponent(r.category)}">${esc(r.category)}</a>` : ''}<h2><a href="/post/${r.slug}">${esc(r.title)}</a></h2><div class="m">${day(r.publish_at)}</div><p>${esc(r.summary)}</p></div></div>`;
+const card = (r) => `<div class="card">${r.image_url ? `<a href="${postHref(r.slug)}">${aiImg(r.image_url) ? thumb(r) : `<img loading="lazy" width="640" height="360" src="${esc(r.image_url)}" alt="${esc(r.title)}">`}</a>` : `<a href="${postHref(r.slug)}">${cover(r)}</a>`}<div class="p">${r.category ? `<a class="chip" href="/category/${encodeURIComponent(r.category)}">${esc(r.category)}</a>` : ''}<h2><a href="${postHref(r.slug)}">${esc(r.title)}</a></h2><div class="m">${day(r.publish_at)}</div><p>${esc(r.summary)}</p></div></div>`;
 
 // ---------- static trust pages (AdSense / E-E-A-T essentials) ----------
 function staticPage(env, key) {
@@ -103,7 +123,7 @@ function staticPage(env, key) {
     'about': ['About Us', `<p>${n} is an independent news-and-explainer website. We watch what India is searching for, collect facts from multiple published sources, and write our own short, clear explainers so readers get the full picture in one place.</p><p>Every article lists the sources it was based on, and carries a publish date so you know how fresh it is.</p><p>Written by: <b>${esc(env.AUTHOR_NAME)}</b> (editorial desk). Questions or corrections: <a href="mailto:${mail}">${mail}</a>.</p>`],
     'editorial-policy': ['Editorial Policy', `<h2>How articles are made</h2><p>Topics come from public trend data. For each topic we collect reporting from at least three independent outlets, then draft an original article in our own words. Drafts are produced with the help of AI tools, checked claim-by-claim against the collected sources, tested for similarity to those sources, and then approved by a person or by our automated quality gate before they go live.</p><h2>What we do not do</h2><p>We do not copy text from other websites, publish unverified rumours as facts, or invent quotes. If sources disagree, we say so.</p><h2>Images and video</h2><p>Images come from openly licensed libraries and are credited under the picture. Videos are embedded from the original publisher.</p><h2>Corrections</h2><p>If you find an error, email <a href="mailto:${mail}">${mail}</a> with the page link. Confirmed errors are corrected quickly and the page is updated.</p>`],
     'contact': ['Contact Us', `<p>For corrections, copyright concerns, advertising or any feedback, email us at <a href="mailto:${mail}">${mail}</a>. We usually reply within 2-3 working days.</p>`],
-    'privacy-policy': ['Privacy Policy', `<p>Last updated: ${day(now())}. This policy explains what information ${n} (${s}) handles when you visit.</p><h2>Information we collect</h2><p>We do not ask visitors to create accounts. Our servers and hosting provider (Cloudflare) may log technical data such as IP address, browser type and pages visited, for security and performance.</p><h2>Cookies and advertising</h2><p>We may show ads served by Google AdSense. Google and its partners use cookies to serve ads based on your visits to this and other sites. You can opt out of personalised advertising at <a href="https://www.google.com/settings/ads">google.com/settings/ads</a>, and learn how Google uses data at <a href="https://policies.google.com/technologies/partner-sites">policies.google.com/technologies/partner-sites</a>. Where required by law (for example in the EEA and UK), consent is requested before personalised ads are shown.</p><h2>Third-party content</h2><p>Some pages embed YouTube videos (privacy-enhanced mode). Those services may set their own cookies when you play a video. Links to other sites are not under our control.</p><h2>Children</h2><p>This site is not directed at children under 13.</p><h2>Contact</h2><p><a href="mailto:${mail}">${mail}</a></p>`],
+    'privacy-policy': ['Privacy Policy', `<p>Last updated: ${esc(env.POLICY_UPDATED || '2026-11-08')}. This policy explains what information ${n} (${s}) handles when you visit.</p><h2>Information we collect</h2><p>We do not ask visitors to create accounts. Our servers and hosting provider (Cloudflare) may log technical data such as IP address, browser type and pages visited, for security and performance.</p><h2>Cookies and advertising</h2><p>We may show ads served by Google AdSense. Google and its partners use cookies to serve ads based on your visits to this and other sites. You can opt out of personalised advertising at <a href="https://www.google.com/settings/ads">google.com/settings/ads</a>, and learn how Google uses data at <a href="https://policies.google.com/technologies/partner-sites">policies.google.com/technologies/partner-sites</a>. Where required by law (for example in the EEA and UK), consent is requested before personalised ads are shown.</p><h2>Third-party content</h2><p>Some pages embed YouTube videos (privacy-enhanced mode). Those services may set their own cookies when you play a video. Links to other sites are not under our control.</p><h2>Children</h2><p>This site is not directed at children under 13.</p><h2>Contact</h2><p><a href="mailto:${mail}">${mail}</a></p>`],
     'terms': ['Terms of Use', `<p>By using ${n} you agree to these terms. Content is provided for general information. You may share links and short excerpts with credit and a link back; you may not republish full articles without permission. We may change or remove content at any time. Use of the site is at your own risk.</p>`],
     'disclaimer': ['Disclaimer', `<p>Information on ${n} is compiled from public sources and is provided for general information only. It is not legal, financial, medical or investment advice. We try to keep articles accurate but cannot guarantee completeness. Please verify important details from official sources before acting on them.</p>`],
   }[key];
@@ -111,16 +131,57 @@ function staticPage(env, key) {
 }
 
 // ---------- admin auth ----------
-async function token(env) {
-  const enc = new TextEncoder();
+// Cookie = "<unix-time>.<hmac>", so a stolen cookie stops working after 30 days even if the password never changes.
+const ADMIN_TTL = 30 * 86400;
+const enc = new TextEncoder();
+const hex = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+// Constant-time compare: a simple === leaks, through timing, how many characters matched.
+const safeEq = (a, b) => {
+  const x = String(a || ''), y = String(b || '');
+  if (x.length !== y.length) return false;
+  let diff = 0;
+  for (let i = 0; i < x.length; i++) diff |= x.charCodeAt(i) ^ y.charCodeAt(i);
+  return diff === 0;
+};
+async function adminSig(env, ts) {
   const key = await crypto.subtle.importKey('raw', enc.encode(env.ADMIN_PASSWORD), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-  const sig = await crypto.subtle.sign('HMAC', key, enc.encode('virall-admin'));
-  return [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  return hex(await crypto.subtle.sign('HMAC', key, enc.encode(`virall-admin|${ts}`)));
 }
+async function token(env, ts = now()) { return `${ts}.${await adminSig(env, ts)}`; }
 async function isAdmin(req, env) {
   if (!env.ADMIN_PASSWORD) return false;
   const m = (req.headers.get('Cookie') || '').match(/(?:^|;\s*)adm=([^;]+)/);
-  return !!m && m[1] === (await token(env));
+  if (!m) return false;
+  const [ts, sig] = m[1].split('.');
+  if (!sig || !/^\d{1,12}$/.test(ts)) return false;
+  if (now() - Number(ts) > ADMIN_TTL) return false;
+  return safeEq(sig, await adminSig(env, Number(ts)));
+}
+// Brute-force protection on /admin/login: 8 wrong passwords from one IP in 15 minutes => 15 minute block.
+// Uses the existing API_USAGE KV namespace (optional: without it, only the password check runs).
+const LOGIN_MAX = 8, LOGIN_WINDOW = 900;
+const loginKey = (req) => `login:${req.headers.get('CF-Connecting-IP') || 'unknown'}`;
+async function loginBlocked(env, req) {
+  if (!env.API_USAGE) return false;
+  try { return Number(await env.API_USAGE.get(loginKey(req))) >= LOGIN_MAX; } catch { return false; }
+}
+async function loginFail(env, req) {
+  if (!env.API_USAGE) return;
+  try {
+    const k = loginKey(req), n = Number(await env.API_USAGE.get(k)) || 0;
+    await env.API_USAGE.put(k, String(n + 1), { expirationTtl: LOGIN_WINDOW });
+  } catch {}
+}
+async function loginClear(env, req) {
+  if (!env.API_USAGE) return;
+  try { await env.API_USAGE.delete(loginKey(req)); } catch {}
+}
+// Blocks form posts coming from another website (CSRF). Missing Origin is allowed so curl/old browsers still work;
+// the SameSite=Strict cookie is the second layer of defence.
+function sameOrigin(req) {
+  const o = req.headers.get('Origin');
+  if (!o) return true;
+  try { return new URL(o).host === new URL(req.url).host; } catch { return false; }
 }
 
 // ---------- scheduled jobs ----------
@@ -154,8 +215,40 @@ async function pingIndexNow(env) {
   if (!results.length) return;
   const host = new URL(env.SITE_URL).host;
   const r = await fetch('https://api.indexnow.org/indexnow', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ host, key: env.INDEXNOW_KEY, keyLocation: `${env.SITE_URL}/${env.INDEXNOW_KEY}.txt`, urlList: results.map((x) => `${env.SITE_URL}/post/${x.slug}`) }) });
+    body: JSON.stringify({ host, key: env.INDEXNOW_KEY, keyLocation: `${env.SITE_URL}/${env.INDEXNOW_KEY}.txt`, urlList: results.map((x) => env.SITE_URL + postHref(x.slug)) }) });
   if (r.status < 300) await env.DB.prepare(`UPDATE posts SET pinged=1 WHERE id IN (${results.map(() => '?').join(',')})`).bind(...results.map((x) => x.id)).run();
+}
+
+// One click = one visible result. Research the next pending topic; if there is none, retry the
+// oldest thin topic; then open a ready/latest topic instead of returning a dead-end message.
+async function researchOneClick(env, parts = []) {
+  let r = null;
+  try {
+    const list = await researchPending(env, 1);
+    r = list[0] || null;
+    if (r) parts.push(`Research: ${r.query} -> ${r.status}/${r.sources}${r.reason ? ' (' + r.reason + ')' : ''}`);
+  } catch (e) { parts.push('Research fail: ' + String(e.message).slice(0, 160)); }
+  if (r && r.id) return go('/admin/topic/' + r.id + '?msg=' + encodeURIComponent(parts.join(' | ')));
+  const thin = await env.DB.prepare("SELECT * FROM topics WHERE status='thin' ORDER BY updated_at ASC LIMIT 1").first();
+  if (thin) {
+    try {
+      const x = await researchTopic(env, thin);
+      parts.push(`Purana thin topic dobara padha: ${x.query} -> ${x.status}/${x.sources}${x.reason ? ' (' + x.reason + ')' : ''}`);
+      return go('/admin/topic/' + thin.id + '?msg=' + encodeURIComponent(parts.join(' | ')));
+    } catch (e) { parts.push('Dobara research fail: ' + String(e.message).slice(0, 160)); }
+  }
+  const ready = await env.DB.prepare("SELECT id,query FROM topics WHERE status='ready' ORDER BY id LIMIT 1").first();
+  if (ready) {
+    parts.push('Ready topic khola: ' + ready.query);
+    return go('/admin/topic/' + ready.id + '?msg=' + encodeURIComponent(parts.join(' | ')));
+  }
+  const any = await env.DB.prepare('SELECT id,query FROM topics ORDER BY id DESC LIMIT 1').first();
+  if (any) {
+    parts.push('Latest topic khola: ' + any.query);
+    return go('/admin/topic/' + any.id + '?msg=' + encodeURIComponent(parts.join(' | ')));
+  }
+  parts.push('DB me ek bhi topic nahi. Trends source check karo: /admin/api-status');
+  return go('/admin/topics?msg=' + encodeURIComponent(parts.join(' | ')));
 }
 
 export default {
@@ -173,27 +266,28 @@ export default {
         console.log('write', e.message);
         try { await setSetting(env, 'last_write', JSON.stringify({ at: now(), ok: false, msg: 'ERROR: ' + String(e.message).slice(0, 250) })); } catch {}
       }
-      // Step 4 will add: image + video for drafts
+      // images/video are added by writeOne() and can be refreshed from the post review page
     })());
   },
 
   async fetch(req, env) {
+    try {
     const url = new URL(req.url), p = url.pathname.replace(/\/+$/, '') || '/', site = env.SITE_URL || url.origin;
     const t = now();
 
     if (p === '/robots.txt') return new Response(`User-agent: *\nAllow: /\nDisallow: /admin\nDisallow: /search\n\nSitemap: ${site}/sitemap.xml\n`, { headers: { 'Content-Type': 'text/plain' } });
-    if (p === '/ads.txt') return new Response(env.ADSENSE_PUB ? `google.com, ${env.ADSENSE_PUB}, DIRECT, f08c47fec0942fa0\n` : '# set ADSENSE_PUB\n', { headers: { 'Content-Type': 'text/plain' } });
+    if (p === '/ads.txt') { const pub = adsPub(env); return new Response(pub ? `google.com, ${pub}, DIRECT, f08c47fec0942fa0\n` : '# set ADSENSE_PUB\n', { headers: { 'Content-Type': 'text/plain' } }); }
     if (env.INDEXNOW_KEY && p === `/${env.INDEXNOW_KEY}.txt`) return new Response(env.INDEXNOW_KEY, { headers: { 'Content-Type': 'text/plain' } });
 
     if (p === '/sitemap.xml') {
       const { results } = await env.DB.prepare(`SELECT slug,image_url,publish_at,updated_at FROM posts WHERE ${LIVE} ORDER BY publish_at DESC LIMIT 5000`).bind(t).all();
       const cats = await env.DB.prepare(`SELECT DISTINCT category FROM posts WHERE ${LIVE} AND category IS NOT NULL AND category!=''`).bind(t).all();
       const st = ['about', 'editorial-policy', 'contact', 'privacy-policy', 'terms', 'disclaimer'];
-      return xml(`<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:image="http://www.google.com/schemas/sitemap-image/1.1"><url><loc>${site}/</loc></url>${st.map((s) => `<url><loc>${site}/${s}</loc></url>`).join('')}${cats.results.map((c) => `<url><loc>${site}/category/${encodeURIComponent(c.category)}</loc></url>`).join('')}${results.map((r) => `<url><loc>${site}/post/${r.slug}</loc><lastmod>${new Date((r.updated_at || r.publish_at) * 1000).toISOString()}</lastmod>${okImg(r.image_url) ? `<image:image><image:loc>${esc(r.image_url)}</image:loc></image:image>` : ''}</url>`).join('')}</urlset>`);
+      return xml(`<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:image="http://www.google.com/schemas/sitemap-image/1.1"><url><loc>${site}/</loc></url>${st.map((s) => `<url><loc>${site}/${s}</loc></url>`).join('')}${cats.results.map((c) => `<url><loc>${site}/category/${encodeURIComponent(c.category)}</loc></url>`).join('')}${results.map((r) => `<url><loc>${esc(site + postHref(r.slug))}</loc><lastmod>${new Date((r.updated_at || r.publish_at) * 1000).toISOString()}</lastmod>${okImg(r.image_url) ? `<image:image><image:loc>${esc(r.image_url)}</image:loc></image:image>` : ''}</url>`).join('')}</urlset>`);
     }
     if (p === '/feed.xml') {
       const { results } = await env.DB.prepare(`SELECT slug,title,summary,publish_at FROM posts WHERE ${LIVE} ORDER BY publish_at DESC LIMIT 50`).bind(t).all();
-      return xml(`<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><title>${esc(env.SITE_NAME)}</title><link>${site}</link><description>${esc(env.SITE_TAGLINE)}</description>${results.map((r) => `<item><title>${esc(r.title)}</title><link>${site}/post/${r.slug}</link><guid>${site}/post/${r.slug}</guid><pubDate>${new Date(r.publish_at * 1000).toUTCString()}</pubDate><description>${esc(r.summary)}</description></item>`).join('')}</channel></rss>`);
+      return xml(`<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><title>${esc(env.SITE_NAME)}</title><link>${site}</link><description>${esc(env.SITE_TAGLINE)}</description><language>${esc(env.POST_LANG === 'en' ? 'en-in' : 'hi-in')}</language><lastBuildDate>${new Date().toUTCString()}</lastBuildDate>${results.map((r) => `<item><title>${esc(r.title)}</title><link>${esc(site + postHref(r.slug))}</link><guid>${esc(site + postHref(r.slug))}</guid><pubDate>${new Date(r.publish_at * 1000).toUTCString()}</pubDate><description>${esc(r.summary)}</description></item>`).join('')}</channel></rss>`);
     }
 
     // ----- AI illustrations stored in D1 -----
@@ -259,7 +353,7 @@ export default {
     }
 
     const sp = staticPage(env, p.slice(1));
-    if (sp) return L({ title: sp.title, desc: sp.title + ' - ' + name, canonical: `${site}${p}`, lang: 'en', noAdScript: p !== '/about' && false }, sp.body);
+    if (sp) return L({ title: sp.title, desc: sp.title + ' - ' + name, canonical: `${site}${p}`, lang: 'en' }, sp.body);
 
     if (p.startsWith('/post/')) {
       const slug = dec(p.slice(6));
@@ -269,7 +363,7 @@ export default {
       const wc = r.word_count || words(r.body), showAds = wc >= Number(env.MIN_WORDS_FOR_ADS || 600);
       const { html: bodyHtml, h2s } = renderBody(r.body, showAds ? adSlot(env) : '');
       const rel = (await env.DB.prepare(`SELECT slug,title,summary,image_url,category,publish_at FROM posts WHERE ${LIVE} AND id!=? ORDER BY (category=?) DESC, publish_at DESC LIMIT 4`).bind(t, r.id, r.category || '').all()).results;
-      const v = ytId(r.video_url), canon = `${site}/post/${r.slug}`;
+      const v = ytId(r.video_url), canon = site + postHref(r.slug);
       let srcs = []; try { srcs = JSON.parse(r.sources || '[]'); } catch {}
       srcs = (Array.isArray(srcs) ? srcs : []).filter((s) => /^https?:\/\//i.test(String((s && s.url) || s || ''))); // only real web links (no javascript: etc.)
       const tags = String(r.tags || '').split(',').map((x) => x.trim()).filter(Boolean);
@@ -278,20 +372,29 @@ export default {
       const enc = encodeURIComponent, shareT = enc(r.title), shareU = enc(canon);
       const b = `<div class="crumb"><a href="/">Home</a>${r.category ? ` &rsaquo; <a href="/category/${enc(r.category)}">${esc(r.category)}</a>` : ''}</div>
 <article><h1>${esc(r.title)}</h1><div class="m">By ${esc(env.AUTHOR_NAME)} &middot; Published ${day(r.publish_at)}${r.updated_at && r.updated_at - r.publish_at > 86400 ? ` &middot; Updated ${day(r.updated_at)}` : ''} &middot; ${Math.max(1, Math.round(wc / 200))} min read</div>
-${r.image_url ? `<p>${aiImg(r.image_url) ? thumb(r, true) : `<img class="hero" width="1200" height="675" fetchpriority="high" src="${esc(r.image_url)}" alt="${esc(r.title)}">`}<span class="m credit">Image: ${esc(r.image_credit)}</span></p>` : `<p>${cover(r, true)}</p>`}
+${r.image_url ? `<p>${aiImg(r.image_url) ? thumb(r, true) : `<img class="hero" width="1200" height="675" fetchpriority="high" src="${esc(r.image_url)}" alt="${esc(r.title)}">`}<span class="m credit">Image: ${aiImg(r.image_url) ? 'AI-generated illustration' : esc(r.image_credit || 'source')}</span></p>` : `<p>${cover(r, true)}</p>`}
 <p><i>${esc(r.summary)}</i></p>
 ${h2s.length >= 3 ? `<nav class="toc" aria-label="Contents"><b>Contents</b><ol>${h2s.map((h) => `<li><a href="#${h.id}">${esc(h.t)}</a></li>`).join('')}</ol></nav>` : ''}
 ${bodyHtml}
+${showAds ? `<div class="adwrap">${adSlot(env, 'ADSENSE_SLOT_BOTTOM')}</div>` : ''}
 ${v ? `<h2>Video</h2><div class="vid"><iframe loading="lazy" title="${esc(r.title)}" src="https://www.youtube-nocookie.com/embed/${v}" allowfullscreen></iframe></div>` : ''}
 ${srcs.length ? `<h2>Sources</h2><ul>${srcs.map((s) => `<li><a rel="nofollow noopener" target="_blank" href="${esc(s.url || s)}">${esc(s.title || s.url || s)}</a></li>`).join('')}</ul>` : ''}
 ${tags.length ? `<p>${tags.map((x) => `<a class="chip" href="/search?q=${enc(x)}">#${esc(x)}</a>`).join('')}</p>` : ''}
 <div class="share"><b>Share:</b> <a href="https://wa.me/?text=${shareT}%20${shareU}">WhatsApp</a><a href="https://t.me/share/url?url=${shareU}&text=${shareT}">Telegram</a><a href="https://twitter.com/intent/tweet?text=${shareT}&url=${shareU}">X</a><a href="https://www.facebook.com/sharer/sharer.php?u=${shareU}">Facebook</a></div>
 <p class="note">Yeh lekh AI ki madad se taiyar hua aur multiple sources se jaanch kar publish kiya gaya. Details: <a href="/editorial-policy">Editorial Policy</a>. Galti mile to <a href="/contact">hamein batayein</a>.</p></article>
 ${rel.length ? `<h2>Aur padhein</h2><div class="grid">${rel.map(card).join('')}</div>` : ''}`;
-      return L({ title: r.title, desc: r.summary, canonical: canon, image: okImg(r.image_url), type: 'article', lang: r.lang || 'hi', ld }, b);
+      return L({
+        title: r.title, desc: r.summary, canonical: canon, image: okImg(r.image_url), type: 'article', lang: r.lang || 'hi', ld,
+        published: new Date(r.publish_at * 1000).toISOString(),
+        modified: new Date((r.updated_at || r.publish_at) * 1000).toISOString(),
+      }, b);
     }
 
     return L({ title: 'Not found', noindex: true }, '<h1>404</h1><p>Yeh page nahi mila. <a href="/">Home par jaiye</a>.</p>', 404);
+    } catch (e) {
+      console.error('request failed:', (e && e.stack) || e);
+      return new Response('<!doctype html><meta charset="utf-8"><meta name="robots" content="noindex"><title>Thodi der ke liye problem</title><body style="font-family:system-ui;padding:24px;max-width:640px;margin:0 auto"><h1>Thodi der ke liye problem</h1><p>Yeh page load nahi ho paya. 1-2 minute baad <a href="/">home</a> par dobara try karo.</p></body>', { status: 500, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', ...HDR } });
+    }
   },
 };
 
@@ -300,13 +403,22 @@ async function admin(req, env, p, url) {
   const O = { admin: true, noindex: true, noAdScript: true };
   const A = (title, body, status = 200) => html(layout(env, { ...O, title }, body), status, false);
   if (!env.ADMIN_PASSWORD) return A('Setup', '<p>Cloudflare Settings &rarr; Variables and Secrets me <b>ADMIN_PASSWORD</b> (secret) add karo.</p>');
+  if (req.method !== 'GET' && !sameOrigin(req)) return A('Blocked', '<p>Yeh request kisi doosri site se aayi thi. Admin page kholkar dobara try karo.</p>', 403);
   if (p === '/admin/login' && req.method === 'POST') {
+    if (await loginBlocked(env, req)) return A('Login', '<p>Bahut zyada galat koshish. 15 minute baad dobara try karo.</p>', 429);
     const f = await req.formData();
-    if (f.get('password') === env.ADMIN_PASSWORD) return go('/admin', { 'Set-Cookie': `adm=${await token(env)}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=2592000` });
+    if (safeEq(f.get('password'), env.ADMIN_PASSWORD)) {
+      await loginClear(env, req);
+      return go('/admin', { 'Set-Cookie': `adm=${await token(env)}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${ADMIN_TTL}` });
+    }
+    await loginFail(env, req);
     return A('Login', '<p>Galat password.</p><p><a href="/admin">Back</a></p>', 401);
   }
-  if (!(await isAdmin(req, env))) return A('Login', '<form method="post" action="/admin/login"><input type="password" name="password" placeholder="Admin password" required><button>Login</button></form>');
+  if (!(await isAdmin(req, env))) return A('Login', '<form method="post" action="/admin/login"><input type="password" name="password" placeholder="Admin password" autocomplete="current-password" required><button>Login</button></form>');
   if (p === '/admin/logout') return go('/admin', { 'Set-Cookie': 'adm=; Path=/; Max-Age=0' });
+
+  // Multi-API status dashboard (was imported but never routed)
+  if (p === '/admin/api-status') return handleAPIStatus(env);
 
   if (p === '/admin/setting' && req.method === 'POST') {
     const f = await req.formData(), k = String(f.get('k') || '');
@@ -335,23 +447,27 @@ async function admin(req, env, p, url) {
   if (p === '/admin/topics/run' && req.method === 'POST') {
     const parts = [];
     try { const c = await collectTopics(env); parts.push(`Naye topics: ${c.added}${c.note ? ' (' + c.note + ')' : ''} [source: ${c.via || '-'}${c.errs && c.errs.length ? '; ' + c.errs.join(', ') : ''}]`); }
-    catch (e) { parts.push('Topics fetch fail: ' + e.message); }
-    try { const r = await researchPending(env, 3); parts.push('research: ' + (r.map((x) => x.status + '/' + x.sources).join(', ') || 'koi pending nahi')); }
-    catch (e) { parts.push('Research fail: ' + e.message); }
-    return go('/admin/topics?msg=' + encodeURIComponent(parts.join(' | ')));
+    catch (e) { parts.push('Topics fetch fail: ' + String(e.message).slice(0, 160)); }
+    // One click = one concrete result (never a dead-end "koi pending nahi").
+    return researchOneClick(env, parts);
+  }
+  if (p === '/admin/topics/research' && req.method === 'POST') {
+    return researchOneClick(env, []);
   }
   if (p === '/admin/write' && req.method === 'POST') {
-    let msg = '';
-    try { const r = await writeOne(env); msg = r.ok ? `Draft ban gaya: ${r.title} (score ${r.score}, ${r.words} shabd)` : 'Draft nahi bana: ' + r.reason; }
-    catch (e) { msg = 'ERROR: ' + e.message; }
-    return go('/admin/topics?msg=' + encodeURIComponent(msg.slice(0, 350)));
+    try {
+      const r = await writeOne(env);
+      if (r.ok && r.postId) return go('/admin/post/' + r.postId + '?msg=' + encodeURIComponent(`Draft ban gaya: ${r.title} (score ${r.score}, ${r.words} shabd). Neeche padh kar Approve karo.`));
+      return go('/admin/topics?msg=' + encodeURIComponent('Draft nahi bana: ' + (r.reason || 'unknown')));
+    } catch (e) { return go('/admin/topics?msg=' + encodeURIComponent('ERROR: ' + String(e.message).slice(0, 250))); }
   }
   // Fact Card: bina AI (0 token), turant
   if (p === '/admin/card' && req.method === 'POST') {
-    let msg = '';
-    try { const r = await cardOne(env); msg = r.ok ? `Card ban gaya: ${r.query} (${r.facts} facts, 0 token). Topic kholkar dekho.` : 'Card nahi bana: ' + r.reason; }
-    catch (e) { msg = 'ERROR: ' + e.message; }
-    return go('/admin/topics?msg=' + encodeURIComponent(msg.slice(0, 350)));
+    try {
+      const r = await cardOne(env);
+      if (r.ok && r.id) return go('/admin/topic/' + r.id + '?msg=' + encodeURIComponent(`Card ban gaya: ${r.query} (${r.facts} facts, 0 token). Neeche "Card post banao" dabao.`));
+      return go('/admin/topics?msg=' + encodeURIComponent(('Card nahi bana: ' + r.reason).slice(0, 350)));
+    } catch (e) { return go('/admin/topics?msg=' + encodeURIComponent(('ERROR: ' + e.message).slice(0, 350))); }
   }
   // Card post banao: chhota AI call (facts -> 3-5 point), turant /card/<id> par live
   const cpa = p.match(/^\/admin\/topic\/(\d+)\/card-post$/);
@@ -359,27 +475,56 @@ async function admin(req, env, p, url) {
     let msg = '';
     try { const r = await writeCardPost(env, Number(cpa[1])); msg = r.ok ? `Card live: ${r.url}` : r.reason; }
     catch (e) { msg = 'ERROR: ' + e.message; }
-    return go('/admin/topics?msg=' + encodeURIComponent(msg.slice(0, 350)));
+    return go('/admin/topic/' + Number(cpa[1]) + '?msg=' + encodeURIComponent(msg.slice(0, 350)));
+  }
+  // Research one specific topic again (per-topic button on the topic page)
+  const rtm = p.match(/^\/admin\/topic\/(\d+)\/research$/);
+  if (rtm && req.method === 'POST') {
+    const id = Number(rtm[1]);
+    const t = await env.DB.prepare('SELECT * FROM topics WHERE id=?').bind(id).first();
+    if (!t) return go('/admin/topics');
+    try {
+      const r = await researchTopic(env, t);
+      return go(`/admin/topic/${id}?msg=` + encodeURIComponent(`Research: ${r.status}/${r.sources}${r.reason ? ' - ' + r.reason : ''}`));
+    } catch (e) {
+      return go(`/admin/topic/${id}?msg=` + encodeURIComponent('Research fail: ' + String(e.message).slice(0, 250)));
+    }
   }
   // Approve: card dekhkar is topic ka article likhwao (yahin AI token lagte hain)
   const wm = p.match(/^\/admin\/topic\/(\d+)\/write$/);
   if (wm && req.method === 'POST') {
-    let msg = '';
-    try { const r = await writeOne(env, { topicId: Number(wm[1]) }); msg = r.ok ? `Draft ban gaya: ${r.title} (score ${r.score}, ${r.words} shabd)` : 'Draft nahi bana: ' + r.reason; }
-    catch (e) { msg = 'ERROR: ' + e.message; }
-    return go('/admin/topics?msg=' + encodeURIComponent(msg.slice(0, 350)));
+    try {
+      const r = await writeOne(env, { topicId: Number(wm[1]) });
+      if (r.ok && r.postId) return go('/admin/post/' + r.postId + '?msg=' + encodeURIComponent(`Draft ban gaya: ${r.title} (score ${r.score}, ${r.words} shabd). Neeche padh kar Approve karo.`));
+      return go('/admin/topics?msg=' + encodeURIComponent('Draft nahi bana: ' + (r.reason || 'unknown')));
+    } catch (e) { return go('/admin/topics?msg=' + encodeURIComponent('ERROR: ' + String(e.message).slice(0, 250))); }
   }
   if (p === '/admin/topics') {
     const { results } = await env.DB.prepare('SELECT id,query,traffic,status,source_count FROM topics ORDER BY id DESC LIMIT 60').all();
+    const grp = (await env.DB.prepare('SELECT status, COUNT(*) c FROM topics GROUP BY status').all()).results;
+    const cnt = Object.fromEntries(grp.map((x) => [x.status, x.c]));
     const msg = url.searchParams.get('msg');
-    return A('Topics', `<h1>Trending topics</h1>${msg ? `<p class="note">${esc(msg)}</p>` : ''}<form method="post" action="/admin/topics/run"><button>Abhi trends + research chalao</button></form><form method="post" action="/admin/card"><button class="g">Card banao (0 token, turant)</button></form><form method="post" action="/admin/write"><button class="g">Ek draft abhi likho (1-2 min lagenge, page band mat karna)</button></form>${results.map((r) => `<div class="card"><div class="p"><a href="/admin/topic/${r.id}"><b>${esc(r.query)}</b></a><div class="m"><span class="tag">${esc(r.status)}</span> sources: ${r.source_count} &middot; ${esc(r.traffic)}</div></div></div>`).join('') || '<p>Abhi koi topic nahi. Upar ka button dabao.</p>'}`);
+    const counts = `<p class="m">New: ${cnt.new || 0} &middot; Ready: ${cnt.ready || 0} &middot; Thin: ${cnt.thin || 0} &middot; Drafted: ${cnt.drafted || 0} &middot; Rejected: ${cnt.rejected || 0}</p>`;
+    const hint = (cnt.ready || 0) > 0
+      ? `<p class="note">${cnt.ready} ready topic hain. Neeche "Ready topic se ek draft likho" dabao, ya kisi topic ko kholkar "Approve: iska article likho" dabao.</p>`
+      : '';
+    return A('Topics', `<h1>Trending topics</h1>${msg ? `<p class="note">${esc(msg)}</p>` : ''}${counts}${hint}<form method="post" action="/admin/topics/run"><button>Abhi trends + research chalao</button></form><form method="post" action="/admin/topics/research"><button class="g">Agla pending topic research karo (1 click = 1 result)</button></form><form method="post" action="/admin/card"><button class="g">Card banao (0 token, turant)</button></form><form method="post" action="/admin/write"><button class="g">Ready topic se ek draft likho (1-2 min lagenge, page band mat karna)</button></form>${results.map((r) => `<div class="card"><div class="p"><a href="/admin/topic/${r.id}"><b>${esc(r.query)}</b></a><div class="m"><span class="tag">${esc(r.status)}</span> sources: ${r.source_count} &middot; ${esc(r.traffic)}</div></div></div>`).join('') || '<p>Abhi koi topic nahi. Upar ka button dabao.</p>'}`);
   }
   const tm = p.match(/^\/admin\/topic\/(\d+)$/);
   if (tm) {
     const r = await env.DB.prepare('SELECT * FROM topics WHERE id=?').bind(Number(tm[1])).first();
     if (!r) return go('/admin/topics');
     let d = {}; try { d = JSON.parse(r.research || '{}'); } catch {}
-    return A('Topic', `<h1>${esc(r.query)}</h1><p><span class="tag">${esc(r.status)}</span> ${esc(r.traffic)}</p>${d.errors && d.errors.length ? `<p class="note">Provider errors: ${esc(d.errors.join(' | '))} (koshish: ${d.tried || 0} outlets)</p>` : ''}${d.reject_reason ? `<p class="note">Reject karne ki wajah: ${esc(d.reject_reason)}</p>` : ''}${d.park_reason ? `<p class="note">Abhi ruka hai (baad mein dobara try hoga): ${esc(d.park_reason)}</p>` : ''}${d.card ? `<div class="card"><div class="p"><b>Card: ${esc(d.card.hook)}</b> <span class="tag">${esc(d.card.label || '')}</span><ul>${(d.card.facts || []).map((f) => `<li>${esc(f.text)} <span class="m">(${esc((f.outlets || []).join(', '))})</span></li>`).join('')}</ul>${r.status === 'card_live' ? `<p><a href="/card/${r.id}" target="_blank">Card post dekho: /card/${r.id}</a></p>` : `<form method="post" action="/admin/topic/${r.id}/card-post"><button class="g">Card post banao (chhota AI call, turant live)</button></form>`}<form method="post" action="/admin/topic/${r.id}/write"><button class="g">Approve: iska article likho (AI token lagenge, 1-2 min)</button></form></div></div>` : ''}${d.diag ? `<p class="note">Pichli koshish ka hisaab: overlap ${Math.round((d.diag.overlap || 0) * 100)}%, sabse lambi copy ${d.diag.longest || 0} shabd, score ${d.diag.score}. Claims: ${esc((d.diag.claimList || []).map((x) => (x.ok ? 'OK' : 'FAIL(' + (x.why || '') + ')') + ' ' + x.c).join(' | ').slice(0, 900))}</p>` : ''}${d.check ? `<p class="note">Checks: ${esc(JSON.stringify(d.check))}</p>` : ''}${(d.sources || []).map((s) => `<div class="card"><div class="p"><b>${esc(s.source)}</b><br><a href="${esc(/^https?:\/\//i.test(String(s.url || '')) ? s.url : '#')}" target="_blank" rel="noopener">${esc(s.title)}</a><p class="m">${esc(s.snippet)}</p><p class="m">${(s.text || '').length} akshar text</p></div></div>`).join('') || '<p>Research abhi baaki hai.</p>'}<p><a href="/admin/topics">Back</a></p>`);
+    const tmsg = url.searchParams.get('msg');
+    const b = d.brief && d.brief.version ? d.brief : null;
+    const bst = (b && b.stats) || {};
+    const factsHtml = b ? (b.facts || []).slice(0, 6).map((f) => `<li>${esc(f.text)} <span class="m">(${esc((f.outlets || []).join(', '))}${f.agree >= 2 ? ' - agreed' : ''})</span></li>`).join('') : '';
+    const droppedHtml = b ? (b.dropped || []).slice(0, 12).map((x) => `<li>${esc(x.source)}: ${esc(x.reason)}${x.title ? ' - ' + esc(String(x.title).slice(0, 90)) : ''}</li>`).join('') : '';
+    const pre = b
+      ? `<div class="card"><div class="p"><b>Pre-read (0 token)</b> <span class="tag">${b.ok ? 'usable' : 'NOT usable'}</span><p class="m">Language ${esc(b.lang)}${b.mixed ? ' + fallback' : ''} &middot; quality ${b.quality}/100 &middot; ${bst.usable || 0} usable source(s) &middot; ${bst.fullText || 0} with full article text &middot; ${bst.facts || 0} facts (${bst.agreed || 0} agreed) &middot; newest source ${bst.newestAgeHours == null ? 'unknown' : bst.newestAgeHours + 'h old'}</p>${b.reason ? `<p class="note">Rukne ki wajah: ${esc(b.reason)}</p>` : ''}${factsHtml ? `<p class="m"><b>Facts read from sources:</b></p><ul>${factsHtml}</ul>` : ''}${(b.gaps || []).length ? `<p class="note">Missing / do not invent: ${esc((b.gaps || []).join('; '))}</p>` : ''}${droppedHtml ? `<details><summary>Hate hue sources (${(b.dropped || []).length})</summary><ul>${droppedHtml}</ul></details>` : ''}${b.briefText ? `<details><summary>Poora reading brief</summary><pre style="white-space:pre-wrap;font-size:12px">${esc(b.briefText)}</pre></details>` : ''}</div></div>`
+      : '<p class="m">Pre-read abhi nahi bana. Neeche "Research dobara chalao" dabao; sources padhne ke baad yahan brief dikhega.</p>';
+    const actions = `<div class="card"><div class="p"><b>Actions</b><form method="post" action="/admin/topic/${r.id}/research"><button class="o">Research dobara chalao (0 token, sources + pre-read)</button></form><form method="post" action="/admin/topic/${r.id}/write"><button class="g">Approve: iska article likho (AI token lagenge, 1-2 min)</button></form></div></div>`;
+    return A('Topic', `<h1>${esc(r.query)}</h1><p><span class="tag">${esc(r.status)}</span> ${esc(r.traffic)}</p>${tmsg ? `<p class="note">${esc(tmsg)}</p>` : ''}${pre}${actions}${d.errors && d.errors.length ? `<p class="note">Provider errors: ${esc(d.errors.join(' | '))} (koshish: ${d.tried || 0} outlets)</p>` : ''}${d.reject_reason ? `<p class="note">Reject karne ki wajah: ${esc(d.reject_reason)}</p>` : ''}${d.park_reason ? `<p class="note">Abhi ruka hai (baad mein dobara try hoga): ${esc(d.park_reason)}</p>` : ''}${d.card ? `<div class="card"><div class="p"><b>Card: ${esc(d.card.hook)}</b> <span class="tag">${esc(d.card.label || '')}</span><ul>${(d.card.facts || []).map((f) => `<li>${esc(f.text)} <span class="m">(${esc((f.outlets || []).join(', '))})</span></li>`).join('')}</ul>${r.status === 'card_live' ? `<p><a href="/card/${r.id}" target="_blank">Card post dekho: /card/${r.id}</a></p>` : `<form method="post" action="/admin/topic/${r.id}/card-post"><button class="g">Card post banao (chhota AI call, turant live)</button></form>`}</div></div>` : ''}${d.diag ? `<p class="note">Pichli koshish ka hisaab: overlap ${Math.round((d.diag.overlap || 0) * 100)}%, sabse lambi copy ${d.diag.longest || 0} shabd, score ${d.diag.score}. Claims: ${esc((d.diag.claimList || []).map((x) => (x.ok ? 'OK' : 'FAIL(' + (x.why || '') + ')') + ' ' + x.c).join(' | ').slice(0, 900))}</p>` : ''}${d.check ? `<p class="note">Checks: ${esc(JSON.stringify(d.check))}</p>` : ''}${(d.sources || []).map((s) => `<div class="card"><div class="p"><b>${esc(s.source)}</b><br><a href="${esc(/^https?:\/\//i.test(String(s.url || '')) ? s.url : '#')}" target="_blank" rel="noopener">${esc(s.title)}</a><p class="m">${esc(s.snippet)}</p><p class="m">${(s.text || '').length} akshar text</p></div></div>`).join('') || '<p>Research abhi baaki hai.</p>'}<p><a href="/admin/topics">Back</a></p>`);
   }
 
   const m = p.match(/^\/admin\/post\/(\d+)(\/action)?$/);
@@ -437,6 +582,6 @@ ${approveBtns}${btn('reject', 'Reject', 'r')}${btn('to_draft', 'Back to draft', 
   let lw = null; try { lw = JSON.parse(await getSetting(env, 'last_write', '')); } catch {}
   const lwHtml = lw ? `<p class="note">Aakhri auto-draft koshish (${new Date((lw.at + 19800) * 1000).toISOString().replace('T', ' ').slice(0, 16)} IST): ${lw.ok ? 'draft bana: ' : 'nahi bana: '}${esc(lw.msg)}</p>` : '<p class="m">Auto-draft ne abhi tak koi koshish record nahi ki.</p>';
   const sw = (k, on, label) => `<form method="post" action="/admin/setting"><input type="hidden" name="k" value="${k}"><input type="hidden" name="v" value="${on ? 0 : 1}"><button class="${on ? 'g' : 'o'}">${label}: ${on ? 'ON (band karne ke liye dabao)' : 'OFF (chalu karne ke liye dabao)'}</button></form>`;
-  const panel = `<div class="card"><div class="p"><b>Switches</b>${sw('auto_write', aw, 'Auto-draft (har ghante AI khud draft likhe)')}${sw('auto_publish', ap, 'AI auto-publish (draft khud live kare)')}${lwHtml}<p class="m">Auto-draft OFF ho to draft sirf tab banega jab tum Topics page par green button dabaoge. AI auto-publish ON ho to score ${esc(env.AUTO_APPROVE_MIN_SCORE || 95)} ya zyada wale drafts, ${esc(env.AUTO_APPROVE_HOURS || 0)} ghante tak tumne kuch na kiya to, khud live ho jayenge. Dono OFF = har post tum khud approve karoge.</p></div></div>`;
-  return A('Admin', `<p><a href="/admin/new">+ New test draft</a> | <a href="/admin/topics">Topics</a> | <a href="/admin/ai-test">AI test</a> | <a href="/" target="_blank">Site</a> | <a href="/admin/logout">Logout</a></p>${panel}${rows || '<p>Koi post nahi.</p>'}`);
+  const panel = `<div class="card"><div class="p"><b>Switches</b>${sw('auto_write', aw, 'Auto-draft (har ghante AI khud draft likhe)')}${sw('auto_publish', ap, 'AI auto-publish (draft khud live kare)')}${lwHtml}<p class="m">Auto-draft OFF ho to draft sirf tab banega jab tum Topics page par green button dabaoge. AI auto-publish ON ho to score ${esc(env.AUTO_APPROVE_MIN_SCORE || 95)} ya zyada wale drafts, ${esc(env.AUTO_APPROVE_HOURS || 0)} ghante tak tumne kuch na kiya to, khud live ho jayenge. Note: auto-publish sirf tab hoga jab check_json me verified true ho (analysis + har claim ka sabut pass) aur SCORE_MAX ki limit cross ho. Default SCORE_MAX 94 hai, isliye auto-publish practically OFF hai - ye AdSense safety ke liye jaan-boojh kar hai. Dono OFF = har post tum khud approve karoge.</p></div></div>`;
+  return A('Admin', `<p><a href="/admin/new">+ New test draft</a> | <a href="/admin/topics">Topics</a> | <a href="/admin/ai-test">AI test</a> | <a href="/admin/api-status">API status</a> | <a href="/" target="_blank">Site</a> | <a href="/admin/logout">Logout</a></p>${panel}${rows || '<p>Koi post nahi.</p>'}`);
 }

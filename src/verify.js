@@ -3,6 +3,10 @@
 
 export const tok = (s) => String(s || '').toLowerCase().split(/[^\p{L}\p{M}\p{N}]+/u).filter(Boolean);
 
+// A news page that contains instructions for the AI ("ignore previous instructions ...") is poisoned:
+// never give it to the writer or the editor.
+export const looksInjected = (s) => /ignore\s+(all\s+|any\s+|the\s+|your\s+)?(previous|prior|above|earlier)\s+(instructions?|prompts?|rules)|disregard\s+(all\s+|the\s+)?(previous|prior|above)|system\s+prompt|you\s+are\s+now\s+(an?\s+)?(ai|assistant|chatbot|language model)|as\s+an\s+ai\s+(language\s+)?model/i.test(String(s || ''));
+
 export const shingles = (t, k = 6) => {
   const s = new Set();
   for (let i = 0; i + k <= t.length; i++) s.add(t.slice(i, i + k).join(' '));

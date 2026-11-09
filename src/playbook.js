@@ -9,7 +9,7 @@ const now = () => Math.floor(Date.now() / 1000);
 export const TYPES = [
   { type: 'ymyl', label: 'Paisa / sehat ki salah', allow: false,
     why: 'Paisa ya sehat ki salah wala topic: galti ka nuksan bada hai, sirf insaan likhe',
-    re: /\b(stock tips?|share tips?|investment tips?|buy or sell|target price|crypto|bitcoin|mutual fund|ipo gmp|gmp today|loan|insurance|home remedy|home remedies|symptoms?|medicine|dosage|diagnos\w*)\b|निवेश सलाह|शेयर टिप|दवा|इलाज|बीमारी के लक्षण/i },
+    re: /\b(stock tips?|share tips?|investment tips?|buy or sell|target price|crypto|bitcoin|mutual fund|ipo gmp|gmp today|loan|insurance|home remedy|home remedies|symptoms?|medicine|dosage|diagnos\w*|lakshan|ilaaj|ilaj|dawa|dawai|bimari|beemari)\b|निवेश सलाह|शेयर टिप|दवा|इलाज|बीमारी के लक्षण/i },
   { type: 'politics', label: 'Rajniti', allow: true, minSources: 4, maxAgeDays: 2, needDates: true,
     re: /\b(modi|rahul gandhi|bjp|congress|aap party|election|chief minister|parliament|lok sabha|rajya sabha|opposition|kejriwal|nitish|yogi|assembly|vidhan sabha|govt|government)\b|चुनाव|सरकार|मंत्री|भाजपा|कांग्रेस|नरेंद्र|नरेन्द्र|मोदी|विधानसभा|लोकसभा/i,
     rules: ['Kisi neta ya party ke baare mein apni raay, tareef ya aalochna mat likho', 'Jo bhi kaha gaya woh "ne kaha" ke saath likho, notes ke hisaab se', 'Aarop ko sach ki tarah mat likho'] },
@@ -22,7 +22,8 @@ export const TYPES = [
   { type: 'general', label: 'Aam khabar', allow: true, minSources: 3, maxAgeDays: 7, needDates: false,
     rules: ['Sirf notes ke facts likho, apni purani jaankari ya background mat jodo'] },
 ];
-// a topic that is only a person's name (1-3 words, no digits): the AI loves to write a biography from memory
+// a topic that is only a person's name (1-2 words, no digits): the AI loves to write a biography from memory.
+// (3-word queries are usually events/topics like "Odisha train accident", so they must NOT be treated as names.)
 const NAME_ONLY = { type: 'name_only', label: 'Sirf naam', allow: true, minSources: 4, maxAgeDays: 2, needDates: true,
   rules: ['Sirf wahi taaza ghatna likho jo notes ka sabse naya hissa hai', 'Career, purani uplabdhiyan ya biography mat likho'] };
 
@@ -30,7 +31,7 @@ export function classify(query) {
   const q = String(query || '').trim();
   for (const t of TYPES) if (t.re && t.re.test(q)) return t;
   const w = q.split(/\s+/).filter(Boolean);
-  if (w.length >= 1 && w.length <= 3 && !/\d/.test(q)) return NAME_ONLY;
+  if (w.length >= 1 && w.length <= 2 && !/\d/.test(q)) return NAME_ONLY;
   return TYPES.find((t) => t.type === 'general');
 }
 
@@ -40,8 +41,16 @@ const words = (s) => String(s || '').toLowerCase().split(/[^\p{L}\p{M}\p{N}]+/u)
 // retry:true = baad mein (naye/taaza sources aane par) dobara ho sakta hai -> topic 'thin' banta hai, reject nahi. retry nahi = hamesha ke liye.
 export function preflight(topic, rs, nowSec = now()) {
   const p = classify(topic.query);
-  const base = { type: p.type, label: p.label, rules: p.rules || [] };
+  const base = {
+    type: p.type, label: p.label, rules: p.rules || [],
+    minSources: p.minSources || 3, maxAgeDays: p.maxAgeDays || 7, needDates: !!p.needDates
+  };
   if (!p.allow) return { ok: false, ...base, reason: p.why };
+  // The zero-token pre-read runs after research. If it says the source set is not usable,
+  // do not spend a single AI token on this topic.
+  if (rs && rs.brief && rs.brief.version && rs.brief.ok !== true) {
+    return { ok: false, retry: true, ...base, reason: rs.brief.reason || 'Pre-read fail hua: sources kaafi nahi hain' };
+  }
   const src = (rs && rs.sources) || [];
   if (src.length < p.minSources) return { ok: false, retry: true, ...base, reason: `${p.label}: sirf ${src.length} source hain, ${p.minSources} chahiye` };
   // the topic's own words must really appear in at least 2 sources (stops "unrelated sources" drafts)
