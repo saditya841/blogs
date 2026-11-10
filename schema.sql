@@ -65,6 +65,20 @@ CREATE TABLE IF NOT EXISTS images (
   created_at INTEGER
 );
 
+-- Duplicate protection: one fingerprint per post (SimHash + MinHash + exact title hash).
+-- similarity.js ise lazily bhi bana leta hai, phir bhi fresh install ke liye yahan hai.
+CREATE TABLE IF NOT EXISTS post_fingerprints (
+  post_id INTEGER PRIMARY KEY,
+  simhash TEXT,
+  title_simhash TEXT,
+  title_hash TEXT,
+  minhash TEXT,
+  tokens INTEGER DEFAULT 0,
+  title TEXT,
+  created_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_post_fp_created ON post_fingerprints(created_at);
+
 -- Admin switches (auto_write / auto_publish / last_write). Lazily bhi banti hai.
 CREATE TABLE IF NOT EXISTS settings (
   k TEXT PRIMARY KEY,

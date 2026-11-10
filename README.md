@@ -18,6 +18,9 @@ Koi VPS, koi paid database, koi npm dependency nahi. Paisa **Google AdSense** se
 | Worker + saare routes | `src/index.js` |
 | Topic discovery (Google Trends / News) | `src/trends.js` |
 | Zero-token source pre-read / reading brief | `src/preread.js` |
+| Multi-AI debate + code-checked claim ledger | `src/debate.js`, `src/claims.js` |
+| Duplicate check (SimHash/MinHash) | `src/similarity.js` + `post_fingerprints` table |
+| Human-like writing guard | `src/style.js` |
 | AI router (Groq → Gemini → HF → Cohere → Workers AI) | `src/ai.js`, `src/multi-api-manager.js` |
 | Article writer + quality score | `src/writer.js` |
 | Fact-check helpers | `src/verify.js`, `src/facts.js` |
@@ -28,7 +31,8 @@ Koi VPS, koi paid database, koi npm dependency nahi. Paisa **Google AdSense** se
 | SEO helpers | `src/seo-optimizer.js` |
 | Admin API dashboard | `src/admin-api-status.js` |
 | Fresh database | `schema.sql` |
-| Purane database ka upgrade | `migration_v3.sql` + `deploy.sh` |
+| Purane database ka upgrade | `migration_v3.sql` + `migration_v4.sql` + `deploy.sh` |
+| Poora architecture / runbook | `ARCHITECTURE.md` |
 | Tests | `test/unit/*.test.js` |
 
 **Auto-publish default me OFF hai.** Admin panel ke do switches (`auto_write`, `auto_publish`)
@@ -42,7 +46,7 @@ risky hai — isliye manual approve default hai.
 Zaroorat: **Node.js 22+** (Node 26 par test kiye gaye). `npm install` ki zaroorat nahi — koi dependency nahi hai.
 
 ```bash
-npm test          # 241 unit tests (network nahi, DB nahi)
+npm test          # 288 unit tests (network nahi, DB nahi)
 npm run check     # har src/*.js ko import karke syntax/import error pakadta hai
 npx wrangler dev  # local Worker (pehli baar Cloudflare login maangega)
 ```
@@ -87,9 +91,10 @@ npx wrangler d1 execute virall-db --remote --command "ALTER TABLE posts ADD COLU
 npx wrangler d1 execute virall-db --remote --command "ALTER TABLE posts ADD COLUMN schema_json TEXT"
 npx wrangler d1 execute virall-db --remote --file=migration_images_seo.sql
 npx wrangler d1 execute virall-db --remote --file=migration_v3.sql
+npx wrangler d1 execute virall-db --remote --file=migration_v4.sql
 ```
 
-`migration_v3.sql` idempotent hai (sirf `IF NOT EXISTS`), use dobara chalana safe hai.
+`migration_v3.sql` aur `migration_v4.sql` idempotent hain (sirf `IF NOT EXISTS`), unhe dobara chalana safe hai.
 Column `ALTER` dobara chalane par error dega — pehle check kar lo ki column already hai.
 
 ---
@@ -152,6 +157,17 @@ koi key nahi chahiye. Sirf `PEXELS_API_KEY` / `YOUTUBE_API_KEY` na hone se photo
 | `*_MODELS`, `*_DAILY_LIMIT` | code defaults | Per-provider model list / soft limit. |
 | `THUMB_MODE` | khali | `ai` = AI thumbnail pehle, warna stock photo pehle. |
 | `API_TIMEOUT_MS` | `25000` | Har provider call ka timeout. |
+| `DEBATE_ENABLED` | `true` | Multi-AI debate (Reporter/Analyst/Skeptic + judge) write se pehle. |
+| `DEBATE_ROUNDS` | `1` | `0` = sirf 3 roles, `1` = judge cross-exam bhi. |
+| `DEBATE_ROLES` | `3` | Kitne neutral roles (2–3). |
+| `DEBATE_TIMEOUT_MS` | `45000` | Ek debate ka hard deadline (page hang nahi hota). |
+| `DEBATE_REUSE_SECONDS` | `7200` | Preview debate itni der write me reuse (double token no). |
+| `DEBATE_PROVIDER_ORDER` | khali | Optional: `cohere,groq,gemini` — kaun pehle. |
+| `MIN_AGREE_SOURCES` | `2` | Claim "verified" hone ke liye kitne independent outlets. |
+| `DUPLICATE_CHECK` | `true` | Same story pehle se hai to AI se pehle block. |
+| `DUP_MAX_SIMILARITY` | `0.82` | Isse zyada similarity = duplicate. |
+| `DUP_CHECK_LIMIT` | `400` | Kitne purane posts ke fingerprints compare karne hain. |
+| `STYLE_MIN_SCORE` | `60` | Style guard report threshold (penalty score me subtract hota hai). |
 
 **AdSense on karne ke liye:** `ADSENSE_PUB` + `ADSENSE_SLOT` (+ optional bottom slot) bharo,
 deploy karo, phir `https://virall.in/ads.txt` check karo. Detail: `MONETIZATION.md`.
@@ -184,7 +200,14 @@ Pehli baar deploy ke baad:
 - Trends ke 3 source (Google Trends ×2 + Google News) **parallel** chalte hain. Ek provider dead ho to 1.2s ke andar best available source use ho jata hai.
 - Research ke providers 10s par cap hain; article text 6s par. Timeout par retry nahi hota (wahi "time pass" tha).
 - Har research se pehle **pre-read (0 token)** chalta hai. Sources weak/foreign/unrelated hon to topic `thin` hota hai aur AI token kharch nahi hota. Topic page par poora brief + hate hue sources dikhte hain.
+- `ready` topic ke sources purane ho jayein (2+ din) to **write karte waqt code khud fresh sources laata hai** (token se pehle). Fresh nahi mile to topic `thin` ho jata hai; purana error ab nahi aata.
+- **Har draft me image guarantee**: AI/stock image fail ho to branded news-card SVG (0 token, koi API key nahi) `/img/<id>.svg` par banti hai. Topic page par 0-token image preview bhi dikhta hai.
+- **Video optional hai**: site par video lagane ke liye free `YOUTUBE_API_KEY` secret chahiye. Na ho to article phir bhi image ke saath publish ho sakta hai.
 - **Card banao** (0 token) seedha us topic ka page kholta hai, jahan "Card post banao" button milta hai.
+- **Multi-AI debate chalao** (topic page) 3 neutral roles (Reporter/Analyst/Skeptic) + judge chalta hai. Har claim ke saath source line aati hai, aur code check karta hai ki evidence sach me sources me hai ya nahi. Result topic page par verified / single-source / unsupported claims ke roop me dikhta hai.
+- **Approve: iska article likho** dabane par wahi debate (agar 2 ghante ke andar chala hai) reuse hota hai, isliye token dobara kharch nahi hote. Debate na chala ho to write click khud chala leta hai — single click me result.
+- **Duplicate gate (0 token):** agar same story pehle se site par hai (SimHash + MinHash + title hash), topic `duplicate` ho jata hai, AI token kharch nahi hota, aur admin ko purana post dikh jata hai.
+- **Style guard (0 token):** draft me `furthermore`/`in conclusion` jaise AI phrases, flat sentence rhythm ya repeated phrases hon to score me penalty lagti hai; post review page par style score + notes dikhte hain.
 
 ---
 
@@ -244,6 +267,9 @@ Safety rules jo code me already hain:
 - Reading brief AI ko sirf agreed facts, allowed numbers/dates/names aur "missing / do not invent"
   list deta hai — isliye AI apni purani ya bahar ki jaankari se numbers/naam nahi bana sakta.
 - Invented numbers/names code se pakde jaate hain (`verify.js`, `postflight`, `editor.js`).
+- **Multi-AI debate safe hai:** roles neutral analysts hain, koi real neta/neta persona nahi. Kisi ke mu me fake quote daalna prompt me mana hai; article me quotation marks bhi nahi aate. Debate ka claim ledger code verify karta hai (evidence 3-word match + 2+ outlet), AI khud `verified` nahi bol sakta.
+- **Duplicate se pehle block:** same headline/story ka post pehle se ho to topic `duplicate` hota hai aur AI token nahi lagta. `post_fingerprints` table purane posts ke liye khud bhi ban jati hai.
+- **Style guard:** stock AI phrases aur machine-jaisa sentence rhythm score penalty laata hai, taaki content human jaisa rahe.
 - Har post par sources list + "AI ki madad se taiyar" disclaimer.
 
 ---
@@ -254,8 +280,8 @@ Safety rules jo code me already hain:
 npm test
 ```
 
-241 tests in 14 files (`preread`, `validate`, `writer`, `editor`, `playbook`, `verify`, `facts`, `cardpost`, `media`,
-`trends`, `ai`, `api-manager`, `seo-optimizer`, `index`). Sab pure functions / fake KV / fake fetch -
+288 tests in 18 files (`preread`, `validate`, `writer`, `editor`, `playbook`, `verify`, `facts`, `cardpost`, `media`,
+`trends`, `ai`, `api-manager`, `seo-optimizer`, `index`, `claims`, `similarity`, `style`, `debate`). Sab pure functions / fake KV / fake fetch -
 koi network call nahi, koi real DB nahi. `npm run check` har module import karke toota hua
 import/syntax pakadta hai.
 

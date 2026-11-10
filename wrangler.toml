@@ -44,5 +44,19 @@ AI_MODEL = "@cf/openai/gpt-oss-20b"
 # Multi-API system ON
 USE_MULTI_API = "true"
 
+# Multi-AI debate (safe Reporter / Analyst / Skeptic + judge). The claim ledger is checked by code.
+DEBATE_ENABLED = "true"
+DEBATE_ROUNDS = "1"
+DEBATE_ROLES = "3"
+DEBATE_TIMEOUT_MS = "45000"
+DEBATE_REUSE_SECONDS = "7200"
+MIN_AGREE_SOURCES = "2"
+
+# Duplicate protection + style guard (0 token)
+DUPLICATE_CHECK = "true"
+DUP_MAX_SIMILARITY = "0.82"
+DUP_CHECK_LIMIT = "400"
+STYLE_MIN_SCORE = "60"
+
 # API KEYS yahan NAHI hain. Ye Cloudflare Secrets me rakhi jaati hain:
 # GROQ_API_KEY, GEMINI_API_KEY, HUGGINGFACE_API_KEY, COHERE_API_KEY

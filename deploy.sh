@@ -31,6 +31,7 @@ for col in featured_image:TEXT thumbnail_image:TEXT og_image:TEXT "seo_score:INT
 done
 npx wrangler d1 execute virall-db --remote --file=migration_images_seo.sql
 npx wrangler d1 execute virall-db --remote --file=migration_v3.sql
+npx wrangler d1 execute virall-db --remote --file=migration_v4.sql
 # Fresh database? Upar ke ALTER steps ki jagah ek hi baar: --file=schema.sql
 
 # 4. Deploy
