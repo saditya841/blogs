@@ -288,6 +288,8 @@ export class MultiAPIManager {
   }
 
   // ---------- main entry ----------
+  // options.providers = ['gemini','groq'] -> try ONLY those, in that order (multi-AI debate roles).
+  // options.exclude   = ['cohere']       -> skip listed providers.
   async generate(messages, options = {}) {
     const errors = [];
     const stats = await this.getUsageStats(); // one KV read for the whole round
@@ -298,7 +300,13 @@ export class MultiAPIManager {
       cohere: (m, o) => this.callCohere(m, o)
     };
 
-    for (const provider of this.order) {
+    const only = Array.isArray(options.providers)
+      ? options.providers.map((p) => String(p || '').toLowerCase()).filter((p) => callers[p])
+      : null;
+    const skip = new Set(Array.isArray(options.exclude) ? options.exclude.map((p) => String(p || '').toLowerCase()) : []);
+    const order = (only && only.length ? only : this.order).filter((p) => callers[p] && !skip.has(p));
+
+    for (const provider of order) {
       if (!this.apiKeys[provider]) {
         errors.push(`${provider}: API key not configured`);
         continue;

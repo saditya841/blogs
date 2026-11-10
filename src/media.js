@@ -1,4 +1,5 @@
 // Step 4: image (AI thumbnail first; fallback licensed photo -> YouTube thumbnail) + video (YouTube) for a post. Never throws: a post never fails because of media.
+import { generateSVGThumbnail } from './viral-thumbnail-generator.js';
 const UA = { 'User-Agent': 'VirallBot/1.0 (https://virall.in; pcssupp77@gmail.com)', Accept: 'application/json' };
 const now = () => Math.floor(Date.now() / 1000);
 const strip = (h) => String(h || '').replace(/<[^>]+>/g, ' ').replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#0?39;/g, "'").replace(/\s+/g, ' ').trim();
@@ -127,6 +128,22 @@ export async function aiThumbnail(env, o = {}) {
   return { url: `${env.SITE_URL}/img/${id}.jpg`, credit: 'AI-generated illustration' };
 }
 
+// ---- 2b) GUARANTEED FALLBACK IMAGE (0 token, no key): a branded news card SVG stored in D1.
+// AI image can fail (rate limit / binding) and then a draft used to have no image at all. This always works.
+export async function brandedImage(env, text, category) {
+  try {
+    const svg = generateSVGThumbnail(text, category, env.SITE_URL);
+    const bytes = new TextEncoder().encode(svg);
+    let bin = '';
+    for (const b of bytes) bin += String.fromCharCode(b);
+    const b64 = btoa(bin);
+    const id = Math.random().toString(36).slice(2, 8) + Math.random().toString(36).slice(2, 8);
+    await env.DB.prepare('CREATE TABLE IF NOT EXISTS images (id TEXT PRIMARY KEY, mime TEXT, b64 TEXT, created_at INTEGER)').run();
+    await env.DB.prepare('INSERT INTO images(id,mime,b64,created_at) VALUES(?,?,?,?)').bind(id, 'image/svg+xml', b64, now()).run();
+    return { url: `${env.SITE_URL}/img/${id}.svg`, credit: 'Virall graphic' };
+  } catch { return null; }
+}
+
 // ---- 3) YouTube video (needs a free YouTube Data API key in the secret YOUTUBE_API_KEY) ----
 export async function findVideo(env, query) {
   if (!env.YOUTUBE_API_KEY) return { note: 'YOUTUBE_API_KEY set nahi hai' };
@@ -184,6 +201,7 @@ export async function addMedia(env, postId, o = {}) {
       if (!img) img = await tryStock();
       if (!img) img = await tryCommons();
       if (!img && !aiFirst) img = await tryAI();
+      if (!img) img = await brandedImage(env, o.title || query || tags[0] || 'News', o.category);
       if (img) {
         await env.DB.prepare('UPDATE posts SET image_url=?,image_credit=?,updated_at=? WHERE id=?').bind(img.url, img.credit, now(), postId).run();
         out.image = img.credit;

@@ -23,6 +23,11 @@ import { ViralThumbnailGenerator } from './viral-thumbnail-generator.js';
 import { SEOOptimizer } from './seo-optimizer.js';
 import { factCheck, hasAnalysisSection } from './editor.js';
 import { buildBrief } from './preread.js';
+import { researchTopic } from './trends.js';
+import { brandedImage } from './media.js';
+import { runDebate, debateBrief, debateMeta, ledgerTextFromMeta } from './debate.js';
+import { fingerprint, findDuplicate, loadExistingFingerprints, saveFingerprint } from './similarity.js';
+import { styleCheck, styleMeta } from './style.js';
 
 const now = () => Math.floor(Date.now() / 1000);
 export { CATS }; // single source of truth (validate.js)
@@ -99,18 +104,19 @@ export function scoreDraft(m) {
   if (m.hasAnalysis === false) { s -= 6; notes.push('Vishleshan/analysis section nahi hai'); }
   if (m.coverageLow === true) { s -= 6; notes.push('Fact-check ne kam claims diye'); }
   if (m.verified === false) { s -= 12; notes.push('AI fact-check pass nahi hua'); }
+  if (m.stylePenalty) { s -= Math.min(15, Number(m.stylePenalty) || 0); notes.push(`Style guard: ${m.stylePenalty} points kate (machine jaisi bhasha/rhythm)`); }
   return { score: Math.max(0, Math.min(100, Math.round(s))), notes };
 }
 
 async function reject(env, topic, research, reason) {
   research.reject_reason = reason;
   await env.DB.prepare("UPDATE topics SET status='rejected',research=?,updated_at=? WHERE id=?").bind(JSON.stringify(research), now(), topic.id).run();
-  return { ok: false, reason };
+  return { ok: false, reason, spent: true };
 }
 
 const hostOf = (u) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return ''; } };
 
-function buildMessages(env, topic, sources, feedback, brief) {
+function buildMessages(env, topic, sources, feedback, brief, ledgerBlock = '') {
   const lang = langOf(env);
   const langName = lang === 'en' ? 'English' : 'Hindi (Devanagari script)';
   const analysisHeading = lang === 'en' ? '## Analysis' : '## विश्लेषण';
@@ -129,14 +135,18 @@ function buildMessages(env, topic, sources, feedback, brief) {
   const briefBlock = brief && brief.briefText
     ? `READING BRIEF (already checked by code BEFORE writing - trust this):\n${brief.briefText}\n\n`
     : '';
+  const ledgerOut = ledgerBlock
+    ? `CROSS-CHECKED CLAIM LEDGER (3 AI roles + code verification). Use VERIFIED claims as your main facts:\n${ledgerBlock}\n\n`
+    : '';
 
   const user =
-    `Date: ${today}\nTopic: ${topic.query}\n\n${briefBlock}SOURCES:\n${srcBlock}\n\n` +
-    `FIRST read the READING BRIEF and SOURCES above carefully. Only after that, write a news article in ${langName} about this topic using only those facts.\n` +
+    `Date: ${today}\nTopic: ${topic.query}\n\n${briefBlock}${ledgerOut}SOURCES:\n${srcBlock}\n\n` +
+    `FIRST read the READING BRIEF, the CLAIM LEDGER and the SOURCES above carefully. Only after that, write a news article in ${langName} about this topic using only those facts.\n` +
     'Rules:\n' +
     '- 500 to 750 words, 3 to 5 sub-headings written as lines starting with ##\n' +
     `- One sub-heading must be exactly "${analysisHeading}". Its 2 to 3 paragraphs must explain what this news means, why it matters and what to watch next, using only facts from the sources\n` +
     '- Use ONLY the numbers listed under "NUMBERS ALLOWED". Never write another number, date, name or place\n' +
+    '- Use VERIFIED claims normally. A SINGLE-SOURCE claim may only be written as "ek report ke mutabik" / "according to one report". Claims under NOT ALLOWED must never appear\n' +
     '- If something is listed under "MISSING / DO NOT INVENT", leave it out completely\n' +
     '- No bullet points, no quotation marks, no markdown bold\n' +
     '- Do not repeat 6 or more words in a row from any source\n' +
@@ -153,32 +163,48 @@ export async function writeOne(env, opts = {}) {
   // ---- 1. daily limit: IST calendar day (resets 12:00 AM IST) ----
   const limit = Number(env.DAILY_POST_LIMIT || 4);
   const made = (await env.DB.prepare('SELECT COUNT(*) c FROM posts WHERE created_at>=?').bind(dayStartIST()).first()).c;
-  if (made >= limit) return { ok: false, reason: `Aaj ki limit (${limit}) poori` };
+  if (made >= limit) return { ok: false, reason: `Aaj ki limit (${limit}) poori`, spent: false };
 
   // ---- 2. pick a ready topic that passes preflight and has real source text ----
   const cands = opts.topicId
     ? (await env.DB.prepare('SELECT * FROM topics WHERE id=?').bind(opts.topicId).all()).results
     : (await env.DB.prepare("SELECT * FROM topics WHERE status='ready' ORDER BY id LIMIT 8").all()).results;
 
-  let topic = null, research = {}, sources = [], brief = null, why = '';
+  let topic = null, research = {}, sources = [], brief = null, why = '', refreshes = 0;
   for (const c of cands) {
     let r = {};
     try { r = JSON.parse(c.research || '{}'); } catch { r = {}; }
     const pf = preflight(c, r);
     if (!pf.ok) { why = pf.reason || why; continue; }
-    const srcs = (r.sources || [])
+    let srcs = (r.sources || [])
       .map((s) => ({ ...s, text: String(s.text || s.content || s.snippet || s.summary || s.description || '').replace(/\s+/g, ' ').trim() }))
       .filter((s) => s.text);
     if (srcs.map((s) => s.text).join('').length < 400) { why = `${c.query}: sources me text bahut kam hai`; continue; } // not enough material: leave topic untouched
 
     // Step 2b: ZERO-token pre-read. If research already built a brief (new topics), trust it; old topics are
     // read here again. A weak, foreign or unrelated source set stops the topic BEFORE any AI token is spent.
-    const b = (r.brief && r.brief.version === 1)
+    let b = (r.brief && r.brief.version === 1)
       ? r.brief
       : buildBrief(c.query, srcs, {
         lang: langOf(env), nowSec: now(),
         minSources: pf.minSources, maxAgeDays: pf.maxAgeDays, needDates: pf.needDates, label: pf.label
       });
+    // A 'ready' topic researched days ago is NOT writable any more: its newest source may be stale.
+    // Instead of throwing "source 10 din purani" at the admin, fetch fresh sources once here, before
+    // spending any AI token. At most two refreshes per write click so one click never runs forever.
+    const newestSec = Math.max(0, ...srcs.map((s) => Number(s.date) || 0));
+    const ageHours = newestSec ? (now() - newestSec) / 3600 : Number((b.stats && b.stats.newestAgeHours) || 0);
+    const stale = !b.ok || ageHours > Number(pf.maxAgeDays || 7) * 24;
+    if (stale && !opts.noRefresh && refreshes < 2) {
+      refreshes++;
+      const rr = await researchTopic(env, c).catch((e) => ({ status: 'error', reason: String((e && e.message) || e) }));
+      if (!rr || !rr.brief) { why = `${c.query}: ${(rr && rr.reason) || 'refresh fail'}`; continue; }
+      b = rr.brief;
+      srcs = (b.sources || [])
+        .map((s) => ({ ...s, text: String(s.text || s.snippet || '').replace(/\s+/g, ' ').trim() }))
+        .filter((s) => s.text);
+      r = { ...r, brief: b, sources: b.sources || [], researched_at: now() };
+    }
     if (!b.ok) { why = b.reason || `${c.query}: pre-read fail hua`; continue; }
 
     const goodSources = (Array.isArray(b.sources) && b.sources.length ? b.sources : srcs)
@@ -189,7 +215,62 @@ export async function writeOne(env, opts = {}) {
     topic = c; research = r; sources = goodSources; brief = b;
     break;
   }
-  if (!topic) return { ok: false, reason: why || 'Koi kaam ka topic nahi mila' };
+  if (!topic) return { ok: false, reason: why || 'Koi kaam ka topic nahi mila', spent: false };
+
+  // ---- 2c. duplicate check (ZERO token) ----
+  // Same story / same headline pehle se site par hai? Topic ko 'duplicate' mark karo aur AI token
+  // kharch mat karo. Purane posts ke fingerprints pehli baar posts table se bhi ban jate hain.
+  let duplicateInfo = { checked: false, duplicate: false };
+  const dupOff = ['false', '0', 'off', 'no'].includes(String(env.DUPLICATE_CHECK ?? 'true').trim().toLowerCase());
+  if (!dupOff) {
+    const existing = await loadExistingFingerprints(env, Number(env.DUP_CHECK_LIMIT || 400));
+    const candFp = fingerprint(topic.query, (brief.facts || []).map((f) => f.text).join(' '));
+    const dup = findDuplicate(candFp, existing, { block: Number(env.DUP_MAX_SIMILARITY || 0.82) });
+    duplicateInfo = { checked: true, score: dup.score, exact: !!dup.exact, duplicate: !!dup.duplicate };
+    if (dup.duplicate && !opts.ignoreDuplicate) {
+      research.duplicate = {
+        score: dup.score,
+        exact: !!dup.exact,
+        against: dup.against ? { id: dup.against.postId, title: dup.against.title } : null,
+        at: now()
+      };
+      try {
+        await env.DB.prepare("UPDATE topics SET status='duplicate',research=?,updated_at=? WHERE id=?").bind(JSON.stringify(research), now(), topic.id).run();
+      } catch { /* topic status is best-effort; the write still stops */ }
+      return {
+        ok: false,
+        spent: false,
+        duplicate: research.duplicate,
+        reason: `Duplicate: ${dup.reason || 'pehle se milta-julta post hai'}${dup.against && dup.against.title ? ' - ' + String(dup.against.title).slice(0, 90) : ''}`
+      };
+    }
+  }
+
+  // ---- 2d. multi-AI debate + cross-check (before the writer, so the writer starts from checked facts) ----
+  // A debate preview run from the topic page is reused for 2 hours (no double token spend). Any source
+  // refresh makes the old debate stale, so it runs again.
+  const debateOff = ['false', '0', 'off', 'no'].includes(String(env.DEBATE_ENABLED ?? 'true').trim().toLowerCase());
+  let debate = null, debateMetaObj = null, ledgerBlock = '';
+  if (!debateOff) {
+    const prev = research.debate;
+    const prevAt = Number(prev && prev.at) || 0;
+    const prevFresh = !!(prev && prev.ok && prev.ledger && prevAt && now() - prevAt < Number(env.DEBATE_REUSE_SECONDS || 7200) && prevAt >= Number(research.researched_at || 0));
+    if (prevFresh && opts.reuseDebate !== false) {
+      debate = prev;
+      debateMetaObj = prev;
+      ledgerBlock = ledgerTextFromMeta(prev.ledger);
+    } else {
+      debate = await runDebate(env, { topic, sources, brief, lang: langOf(env) });
+      debateMetaObj = debate && debate.ledger ? debateMeta(debate) : null;
+      if (debateMetaObj) {
+        research.debate = debateMetaObj;
+        try {
+          await env.DB.prepare('UPDATE topics SET research=?,updated_at=? WHERE id=?').bind(JSON.stringify(research), now(), topic.id).run();
+        } catch { /* preview save is best-effort */ }
+      }
+      ledgerBlock = debate && debate.ledger ? debateBrief(debate.ledger) : '';
+    }
+  }
 
   const sourceTexts = sources.map((s) => s.text);
   const MAX_OVERLAP = Number(env.COPY_MAX_OVERLAP || 0.3);
@@ -200,7 +281,7 @@ export async function writeOne(env, opts = {}) {
 
   // ---- 3. AI draft (at most one rewrite retry) ----
   const attempt = async (feedback) => {
-    const ai = await runAI(env, buildMessages(env, topic, sources, feedback, brief), { max_tokens: 6000, temperature: 0.6 });
+    const ai = await runAI(env, buildMessages(env, topic, sources, feedback, brief, ledgerBlock), { max_tokens: 6000, temperature: 0.6 });
     if (!ai.text) return { ai, draft: null };
     const draft = parseDraft(ai.text);
     const cc = copyCheck(draft.body, sourceTexts);
@@ -212,7 +293,7 @@ export async function writeOne(env, opts = {}) {
 
   let best = await attempt('');
   if (!best.ai.text) {
-    return { ok: false, reason: `AI draft nahi bana: ${(best.ai.errors || []).join(' | ').slice(0, 300) || 'koi jawab nahi'}` };
+    return { ok: false, reason: `AI draft nahi bana: ${(best.ai.errors || []).join(' | ').slice(0, 300) || 'koi jawab nahi'}`, spent: true };
   }
   const needsRetry = (a) => !usable(a) || a.m.overlap > RETRY_OVERLAP || a.m.longest >= RETRY_RUN;
   if (needsRetry(best)) {
@@ -223,7 +304,7 @@ export async function writeOne(env, opts = {}) {
     if (second.ai.text && usable(second) && (!usable(best) || second.m.overlap < best.m.overlap)) best = second;
   }
   if (!usable(best)) {
-    return { ok: false, reason: 'AI ka draft adhura aaya (title ya 150+ shabd nahi). Dobara try karo.' };
+    return { ok: false, reason: 'AI ka draft adhura aaya (title ya 150+ shabd nahi). Dobara try karo.', spent: true };
   }
   if (best.m.overlap > MAX_OVERLAP || best.m.longest >= MAX_RUN) {
     return reject(env, topic, research, `Copy overlap ${Math.round(best.m.overlap * 100)}% zyada; ${best.m.longest} shabd ki line sources se mil rahi`);
@@ -269,6 +350,8 @@ export async function writeOne(env, opts = {}) {
   const finalUngrounded = ungroundedNumbers(`${draft.title} ${draft.summary} ${draft.body}`, sourceTexts, [thisYear]);
   const headings = (draft.body.match(/^## /gm) || []).length;
   const hasAnalysis = hasAnalysisSection(draft.body);
+  // ZERO-token style guard: stock AI phrases, flat sentence rhythm, repeated openings/phrases.
+  const style = styleCheck(draft.body, { lang: langOf(env), minScore: Number(env.STYLE_MIN_SCORE || 0) });
 
   const scored = scoreDraft({
     ...m,
@@ -281,7 +364,8 @@ export async function writeOne(env, opts = {}) {
     categoryOk: !!category,
     hasAnalysis,
     verified: fc.verified,
-    coverageLow: fc.coverageLow
+    coverageLow: fc.coverageLow,
+    stylePenalty: style.penalty
   });
   const notes = scored.notes;
   // Auto-publish is still capped at 94 by default, even when the fact-check passes. A human should approve the
@@ -316,14 +400,28 @@ export async function writeOne(env, opts = {}) {
       ? thumbGen.generateViralThumbnail(draft.title, draft.category).then((r) => { thumb = r; })
       : Promise.resolve()
   ]);
-  const featured = img && img.success ? img.featuredImage : '';
+  let featured = img && img.success ? img.featuredImage : '';
   const thumbnail = thumb && thumb.success ? thumb.imageUrl : '';
+  // Last resort: a branded news-card image (0 token, no API key) so a draft NEVER reaches review with
+  // no image at all. The AI/stock image is still preferred when available.
+  if (!featured) {
+    const branded = await brandedImage(env, draft.title, draft.category);
+    if (branded) { featured = branded.url; img = { ...(img || {}), credit: branded.credit }; }
+  }
 
   // ---- 6. SEO ----
   const ts = now();
   const seo = new SEOOptimizer(env);
   const seoMeta = seo.generateSEOMetadata({ ...draft, slug, created_at: ts, updated_at: ts, featured_image: featured, thumbnail_image: thumbnail });
   const analysis = seo.analyzeContent({ ...draft, featured_image: featured });
+
+  const debatePostMeta = debateMetaObj
+    ? {
+      ...debateMetaObj,
+      roles: (debateMetaObj.roles || []).map((r) => ({ id: r.id, name: r.name, ok: r.ok, provider: r.provider, model: r.model, claims: r.claims })),
+      errors: (debateMetaObj.errors || []).slice(0, 2)
+    }
+    : null;
 
   // ---- 7. save draft + mark topic, in ONE atomic batch ----
   const row = {
@@ -339,7 +437,7 @@ export async function writeOne(env, opts = {}) {
     sources: JSON.stringify(sources.map(({ text, content, snippet, summary, description, ...rest }) => rest)),
     score,
     word_count: words,
-    check_json: JSON.stringify({ ...fcMeta, overlap: finalCc.overlap, newest_source: newestSource, lang: langOf(env), preread: prereadMeta }),
+    check_json: JSON.stringify({ ...fcMeta, overlap: finalCc.overlap, newest_source: newestSource, lang: langOf(env), preread: prereadMeta, style: styleMeta(style), duplicate: duplicateInfo, debate: debatePostMeta }),
     created_at: ts,
     updated_at: ts,
     featured_image: featured,
@@ -354,13 +452,15 @@ export async function writeOne(env, opts = {}) {
   let postId = null;
   try {
     const insert = env.DB.prepare(`INSERT INTO posts (${cols.join(',')},status) VALUES (${cols.map(() => '?').join(',')},'draft')`).bind(...cols.map((c) => row[c]));
-    const mark = env.DB.prepare("UPDATE topics SET status='drafted',updated_at=? WHERE id=?").bind(ts, topic.id);
+    const topicResearch = { ...research, duplicate: duplicateInfo, debate: debateMetaObj || research.debate, written_at: ts };
+    const mark = env.DB.prepare("UPDATE topics SET status='drafted',research=?,updated_at=? WHERE id=?").bind(JSON.stringify(topicResearch), ts, topic.id);
     const res = await env.DB.batch([insert, mark]);
     postId = (res && res[0] && res[0].meta && res[0].meta.last_row_id) || null;
   } catch (e) {
     console.error('writeOne DB save failed:', e && e.message);
-    return { ok: false, reason: `Draft database me save nahi hua: ${String(e && e.message).slice(0, 200)}` };
+    return { ok: false, reason: `Draft database me save nahi hua: ${String(e && e.message).slice(0, 200)}`, spent: true };
   }
+  if (postId) await saveFingerprint(env, postId, `${draft.title} ${draft.summary || ''}`, draft.body);
 
   console.log(JSON.stringify({ writeOne: 'ok', postId, provider: ai.provider, model: ai.model, score, words, overlap: Math.round(finalCc.overlap * 100), verified: !!fc.verified, claims: fc.claims || 0 }));
 
@@ -381,6 +481,10 @@ export async function writeOne(env, opts = {}) {
     supported: fc.supported || 0,
     hasImages: { featured: !!featured, thumbnail: !!thumbnail },
     imageProvider: (img && img.provider) || null,
+    styleScore: style.score,
+    stylePenalty: style.penalty,
+    duplicateChecked: duplicateInfo.checked,
+    debateVerified: (debateMetaObj && debateMetaObj.stats && debateMetaObj.stats.verified) || 0,
     warnings: notes
   };
 }

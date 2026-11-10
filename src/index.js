@@ -7,6 +7,8 @@ import { writeCardPost, renderCardPage, renderCardsList } from './cardpost.js';
 import { addMedia, makeHook } from './media.js';
 import { validatePost } from './validate.js';
 import { handleAPIStatus } from './admin-api-status.js';
+import { generateSVGThumbnail, svgToDataUrl } from './viral-thumbnail-generator.js';
+import { runDebate, debateMeta } from './debate.js';
 
 const now = () => Math.floor(Date.now() / 1000);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -237,6 +239,17 @@ async function researchOneClick(env, parts = []) {
       return go('/admin/topic/' + thin.id + '?msg=' + encodeURIComponent(parts.join(' | ')));
     } catch (e) { parts.push('Dobara research fail: ' + String(e.message).slice(0, 160)); }
   }
+  // A 'ready' topic whose sources were read more than a day ago is refreshed here, so the ready
+  // list never keeps showing topics that would fail the freshness check at write time.
+  const readyRows = (await env.DB.prepare("SELECT * FROM topics WHERE status='ready' ORDER BY updated_at ASC LIMIT 12").all()).results;
+  const staleReady = readyRows.find((t) => { try { const dd = JSON.parse(t.research || '{}'); return !dd.researched_at || now() - dd.researched_at > 86400; } catch { return true; } });
+  if (staleReady) {
+    try {
+      const x = await researchTopic(env, staleReady);
+      parts.push(`Purana ready topic refresh: ${x.query} -> ${x.status}/${x.sources}${x.reason ? ' (' + x.reason + ')' : ''}`);
+      return go('/admin/topic/' + staleReady.id + '?msg=' + encodeURIComponent(parts.join(' | ')));
+    } catch (e) { parts.push('Refresh fail: ' + String(e.message).slice(0, 160)); }
+  }
   const ready = await env.DB.prepare("SELECT id,query FROM topics WHERE status='ready' ORDER BY id LIMIT 1").first();
   if (ready) {
     parts.push('Ready topic khola: ' + ready.query);
@@ -292,7 +305,7 @@ export default {
 
     // ----- AI illustrations stored in D1 -----
     if (p.startsWith('/img/')) {
-      const id = p.slice(5).replace(/\.jpg$/, '');
+      const id = p.slice(5).replace(/\.(jpg|svg)$/, '');
       try {
         const r = await env.DB.prepare('SELECT mime,b64 FROM images WHERE id=?').bind(id).first();
         if (r) return new Response(Uint8Array.from(atob(r.b64), (c) => c.charCodeAt(0)), { headers: { 'Content-Type': r.mime || 'image/jpeg', 'Cache-Control': 'public, max-age=31536000, immutable', 'X-Content-Type-Options': 'nosniff' } });
@@ -458,7 +471,8 @@ async function admin(req, env, p, url) {
     try {
       const r = await writeOne(env);
       if (r.ok && r.postId) return go('/admin/post/' + r.postId + '?msg=' + encodeURIComponent(`Draft ban gaya: ${r.title} (score ${r.score}, ${r.words} shabd). Neeche padh kar Approve karo.`));
-      return go('/admin/topics?msg=' + encodeURIComponent('Draft nahi bana: ' + (r.reason || 'unknown')));
+      const tok = r.spent === false ? ' | Token kharch nahi hua' : r.spent ? ' | Token laga' : '';
+      return go('/admin/topics?msg=' + encodeURIComponent('Draft nahi bana: ' + (r.reason || 'unknown') + tok));
     } catch (e) { return go('/admin/topics?msg=' + encodeURIComponent('ERROR: ' + String(e.message).slice(0, 250))); }
   }
   // Fact Card: bina AI (0 token), turant
@@ -490,25 +504,56 @@ async function admin(req, env, p, url) {
       return go(`/admin/topic/${id}?msg=` + encodeURIComponent('Research fail: ' + String(e.message).slice(0, 250)));
     }
   }
+  // Multi-AI debate preview for one topic (safe Reporter/Analyst/Skeptic + code-checked claim ledger)
+  const dbm = p.match(/^\/admin\/topic\/(\d+)\/debate$/);
+  if (dbm && req.method === 'POST') {
+    const did = Number(dbm[1]);
+    const t = await env.DB.prepare('SELECT * FROM topics WHERE id=?').bind(did).first();
+    if (!t) return go('/admin/topics');
+    let dd = {};
+    try { dd = JSON.parse(t.research || '{}'); } catch {}
+    const srcs = (dd.sources || [])
+      .map((s) => ({ ...s, text: String(s.text || s.content || s.snippet || '').replace(/\s+/g, ' ').trim() }))
+      .filter((s) => s.text);
+    if (srcs.length < 2) return go(`/admin/topic/${did}?msg=` + encodeURIComponent('Debate ke liye 2 source chahiye. Pehle "Research dobara chalao" dabao.'));
+    try {
+      const dr = await runDebate(env, { topic: t, sources: srcs, brief: dd.brief });
+      dd.debate = debateMeta(dr);
+      dd.debate_at = now();
+      await env.DB.prepare('UPDATE topics SET research=?,updated_at=? WHERE id=?').bind(JSON.stringify(dd), now(), did).run();
+      const st = dr.stats || {};
+      const msg = dr.ok
+        ? `Debate ho gaya: ${st.verified || 0} verified, ${st.singleSource || 0} single-source, ${st.unsupported || 0} unsupported claims. Ab "Approve: iska article likho" dabao - yahi debate dobara use hoga (token bachega).`
+        : `Debate fail: ${dr.reason || (dr.errors || [])[0] || 'unknown'}`;
+      return go(`/admin/topic/${did}?msg=` + encodeURIComponent(msg.slice(0, 400)));
+    } catch (e) {
+      return go(`/admin/topic/${did}?msg=` + encodeURIComponent('Debate fail: ' + String(e.message).slice(0, 250)));
+    }
+  }
   // Approve: card dekhkar is topic ka article likhwao (yahin AI token lagte hain)
   const wm = p.match(/^\/admin\/topic\/(\d+)\/write$/);
   if (wm && req.method === 'POST') {
+    const wid = Number(wm[1]);
     try {
-      const r = await writeOne(env, { topicId: Number(wm[1]) });
+      const r = await writeOne(env, { topicId: wid });
       if (r.ok && r.postId) return go('/admin/post/' + r.postId + '?msg=' + encodeURIComponent(`Draft ban gaya: ${r.title} (score ${r.score}, ${r.words} shabd). Neeche padh kar Approve karo.`));
-      return go('/admin/topics?msg=' + encodeURIComponent('Draft nahi bana: ' + (r.reason || 'unknown')));
-    } catch (e) { return go('/admin/topics?msg=' + encodeURIComponent('ERROR: ' + String(e.message).slice(0, 250))); }
+      const tok = r.spent === false ? ' | Token kharch nahi hua' : r.spent ? ' | Token laga' : '';
+      return go('/admin/topic/' + wid + '?msg=' + encodeURIComponent('Draft nahi bana: ' + (r.reason || 'unknown') + tok));
+    } catch (e) { return go('/admin/topic/' + wid + '?msg=' + encodeURIComponent('ERROR: ' + String(e.message).slice(0, 250))); }
   }
   if (p === '/admin/topics') {
-    const { results } = await env.DB.prepare('SELECT id,query,traffic,status,source_count FROM topics ORDER BY id DESC LIMIT 60').all();
+    const { results } = await env.DB.prepare('SELECT id,query,traffic,status,source_count,research FROM topics ORDER BY id DESC LIMIT 60').all();
     const grp = (await env.DB.prepare('SELECT status, COUNT(*) c FROM topics GROUP BY status').all()).results;
     const cnt = Object.fromEntries(grp.map((x) => [x.status, x.c]));
     const msg = url.searchParams.get('msg');
-    const counts = `<p class="m">New: ${cnt.new || 0} &middot; Ready: ${cnt.ready || 0} &middot; Thin: ${cnt.thin || 0} &middot; Drafted: ${cnt.drafted || 0} &middot; Rejected: ${cnt.rejected || 0}</p>`;
+    const oldReady = (r) => { try { const dd = JSON.parse(r.research || '{}'); return !dd.researched_at || now() - dd.researched_at > 86400; } catch { return true; } };
+    const staleReady = results.filter((r) => r.status === 'ready' && oldReady(r)).length;
+    const rowTag = (r) => (r.status === 'ready' && oldReady(r) ? ' <span class="tag">refresh</span>' : '');
+    const counts = `<p class="m">New: ${cnt.new || 0} &middot; Ready: ${cnt.ready || 0} &middot; Thin: ${cnt.thin || 0} &middot; Drafted: ${cnt.drafted || 0} &middot; Duplicate: ${cnt.duplicate || 0} &middot; Rejected: ${cnt.rejected || 0}</p>`;
     const hint = (cnt.ready || 0) > 0
-      ? `<p class="note">${cnt.ready} ready topic hain. Neeche "Ready topic se ek draft likho" dabao, ya kisi topic ko kholkar "Approve: iska article likho" dabao.</p>`
+      ? `<p class="note">${cnt.ready} ready topic hain${staleReady ? ` (${staleReady} ke sources purane hain - "Draft likho" dabane par pehle apne aap fresh sources aayenge)` : ''}. Neeche "Ready topic se ek draft likho" dabao, ya kisi topic ko kholkar "Approve: iska article likho" dabao.</p>`
       : '';
-    return A('Topics', `<h1>Trending topics</h1>${msg ? `<p class="note">${esc(msg)}</p>` : ''}${counts}${hint}<form method="post" action="/admin/topics/run"><button>Abhi trends + research chalao</button></form><form method="post" action="/admin/topics/research"><button class="g">Agla pending topic research karo (1 click = 1 result)</button></form><form method="post" action="/admin/card"><button class="g">Card banao (0 token, turant)</button></form><form method="post" action="/admin/write"><button class="g">Ready topic se ek draft likho (1-2 min lagenge, page band mat karna)</button></form>${results.map((r) => `<div class="card"><div class="p"><a href="/admin/topic/${r.id}"><b>${esc(r.query)}</b></a><div class="m"><span class="tag">${esc(r.status)}</span> sources: ${r.source_count} &middot; ${esc(r.traffic)}</div></div></div>`).join('') || '<p>Abhi koi topic nahi. Upar ka button dabao.</p>'}`);
+    return A('Topics', `<h1>Trending topics</h1>${msg ? `<p class="note">${esc(msg)}</p>` : ''}${counts}${hint}<form method="post" action="/admin/topics/run"><button>Abhi trends + research chalao</button></form><form method="post" action="/admin/topics/research"><button class="g">Agla pending topic research karo (1 click = 1 result)</button></form><form method="post" action="/admin/card"><button class="g">Card banao (0 token, turant)</button></form><form method="post" action="/admin/write"><button class="g">Ready topic se ek draft likho (1-2 min lagenge, page band mat karna)</button></form>${results.map((r) => `<div class="card"><div class="p"><a href="/admin/topic/${r.id}"><b>${esc(r.query)}</b></a><div class="m"><span class="tag">${esc(r.status)}</span>${rowTag(r)} sources: ${r.source_count} &middot; ${esc(r.traffic)}</div></div></div>`).join('') || '<p>Abhi koi topic nahi. Upar ka button dabao.</p>'}`);
   }
   const tm = p.match(/^\/admin\/topic\/(\d+)$/);
   if (tm) {
@@ -520,11 +565,20 @@ async function admin(req, env, p, url) {
     const bst = (b && b.stats) || {};
     const factsHtml = b ? (b.facts || []).slice(0, 6).map((f) => `<li>${esc(f.text)} <span class="m">(${esc((f.outlets || []).join(', '))}${f.agree >= 2 ? ' - agreed' : ''})</span></li>`).join('') : '';
     const droppedHtml = b ? (b.dropped || []).slice(0, 12).map((x) => `<li>${esc(x.source)}: ${esc(x.reason)}${x.title ? ' - ' + esc(String(x.title).slice(0, 90)) : ''}</li>`).join('') : '';
+    let pv = '';
+    try {
+      const pvCat = (d.card && d.card.label) || 'News';
+      pv = `<div class="card"><div class="p"><b>Image preview (0 token)</b><img src="${esc(svgToDataUrl(generateSVGThumbnail(r.query, pvCat, env.SITE_URL)))}" alt="preview" style="width:100%;max-width:420px;border-radius:10px;margin:8px 0"><p class="m">Ye turant bana preview hai. Draft banne par final image AI/stock se aayegi; agar wo fail ho jaye to yahi image publish hogi.</p><p class="m">Video: <a href="https://www.youtube.com/results?search_query=${encodeURIComponent(r.query)}" target="_blank" rel="noopener">YouTube par dekho (0 token)</a>. Site par video lagane ke liye <code>YOUTUBE_API_KEY</code> secret chahiye (free).</p></div></div>`;
+    } catch {}
     const pre = b
       ? `<div class="card"><div class="p"><b>Pre-read (0 token)</b> <span class="tag">${b.ok ? 'usable' : 'NOT usable'}</span><p class="m">Language ${esc(b.lang)}${b.mixed ? ' + fallback' : ''} &middot; quality ${b.quality}/100 &middot; ${bst.usable || 0} usable source(s) &middot; ${bst.fullText || 0} with full article text &middot; ${bst.facts || 0} facts (${bst.agreed || 0} agreed) &middot; newest source ${bst.newestAgeHours == null ? 'unknown' : bst.newestAgeHours + 'h old'}</p>${b.reason ? `<p class="note">Rukne ki wajah: ${esc(b.reason)}</p>` : ''}${factsHtml ? `<p class="m"><b>Facts read from sources:</b></p><ul>${factsHtml}</ul>` : ''}${(b.gaps || []).length ? `<p class="note">Missing / do not invent: ${esc((b.gaps || []).join('; '))}</p>` : ''}${droppedHtml ? `<details><summary>Hate hue sources (${(b.dropped || []).length})</summary><ul>${droppedHtml}</ul></details>` : ''}${b.briefText ? `<details><summary>Poora reading brief</summary><pre style="white-space:pre-wrap;font-size:12px">${esc(b.briefText)}</pre></details>` : ''}</div></div>`
       : '<p class="m">Pre-read abhi nahi bana. Neeche "Research dobara chalao" dabao; sources padhne ke baad yahan brief dikhega.</p>';
-    const actions = `<div class="card"><div class="p"><b>Actions</b><form method="post" action="/admin/topic/${r.id}/research"><button class="o">Research dobara chalao (0 token, sources + pre-read)</button></form><form method="post" action="/admin/topic/${r.id}/write"><button class="g">Approve: iska article likho (AI token lagenge, 1-2 min)</button></form></div></div>`;
-    return A('Topic', `<h1>${esc(r.query)}</h1><p><span class="tag">${esc(r.status)}</span> ${esc(r.traffic)}</p>${tmsg ? `<p class="note">${esc(tmsg)}</p>` : ''}${pre}${actions}${d.errors && d.errors.length ? `<p class="note">Provider errors: ${esc(d.errors.join(' | '))} (koshish: ${d.tried || 0} outlets)</p>` : ''}${d.reject_reason ? `<p class="note">Reject karne ki wajah: ${esc(d.reject_reason)}</p>` : ''}${d.park_reason ? `<p class="note">Abhi ruka hai (baad mein dobara try hoga): ${esc(d.park_reason)}</p>` : ''}${d.card ? `<div class="card"><div class="p"><b>Card: ${esc(d.card.hook)}</b> <span class="tag">${esc(d.card.label || '')}</span><ul>${(d.card.facts || []).map((f) => `<li>${esc(f.text)} <span class="m">(${esc((f.outlets || []).join(', '))})</span></li>`).join('')}</ul>${r.status === 'card_live' ? `<p><a href="/card/${r.id}" target="_blank">Card post dekho: /card/${r.id}</a></p>` : `<form method="post" action="/admin/topic/${r.id}/card-post"><button class="g">Card post banao (chhota AI call, turant live)</button></form>`}</div></div>` : ''}${d.diag ? `<p class="note">Pichli koshish ka hisaab: overlap ${Math.round((d.diag.overlap || 0) * 100)}%, sabse lambi copy ${d.diag.longest || 0} shabd, score ${d.diag.score}. Claims: ${esc((d.diag.claimList || []).map((x) => (x.ok ? 'OK' : 'FAIL(' + (x.why || '') + ')') + ' ' + x.c).join(' | ').slice(0, 900))}</p>` : ''}${d.check ? `<p class="note">Checks: ${esc(JSON.stringify(d.check))}</p>` : ''}${(d.sources || []).map((s) => `<div class="card"><div class="p"><b>${esc(s.source)}</b><br><a href="${esc(/^https?:\/\//i.test(String(s.url || '')) ? s.url : '#')}" target="_blank" rel="noopener">${esc(s.title)}</a><p class="m">${esc(s.snippet)}</p><p class="m">${(s.text || '').length} akshar text</p></div></div>`).join('') || '<p>Research abhi baaki hai.</p>'}<p><a href="/admin/topics">Back</a></p>`);
+    const dr = d.debate || null;
+    const dl = (dr && dr.ledger) || null;
+    const claimLi = (arr, mark) => (arr || []).slice(0, 10).map((x) => `<li>${mark} ${esc(x.c || x.claim || '')} <span class="m">${esc((x.outlets || []).join(', ') || 'no outlet')}</span></li>`).join('');
+    const debateHtml = !dr ? '' : `<div class="card"><div class="p"><b>Multi-AI debate (safe: Reporter / Analyst / Skeptic)</b> <span class="tag">${dr.ok ? 'checked' : 'fail'}</span><p class="m">${(dr.stats && dr.stats.verified) || 0} verified &middot; ${(dr.stats && dr.stats.singleSource) || 0} single-source &middot; ${(dr.stats && dr.stats.unsupported) || 0} unsupported &middot; ${(Math.round((dr.ms || 0) / 100) / 10)}s${dr.at ? ' &middot; ' + new Date((dr.at + 19800) * 1000).toISOString().replace('T', ' ').slice(0, 16) + ' IST' : ''}</p><p class="m">Roles: ${(dr.roles || []).map((x) => `${esc(x.name)} ${x.ok ? 'OK' : 'fail'} (${esc(x.provider || '-')}, ${x.claims || 0} claims)`).join(' &middot; ')}</p>${dl && (dl.verified || []).length ? `<p class="m"><b>Verified claims (2+ outlets):</b></p><ul>${claimLi(dl.verified, '&#10003;')}</ul>` : ''}${dl && (dl.singleSource || []).length ? `<details><summary>Single-source claims (${dl.singleSource.length}) - article me "ek report ke mutabik" hi likha jayega</summary><ul>${claimLi(dl.singleSource, '&#9888;')}</ul></details>` : ''}${dl && (dl.unsupported || []).length ? `<details><summary>Evidence nahi mila (${dl.unsupported.length}) - writer ko nahi diya jayega</summary><ul>${claimLi(dl.unsupported, '&#10007;')}</ul></details>` : ''}${(dr.errors || []).length ? `<p class="note">${esc((dr.errors || []).join(' | ').slice(0, 300))}</p>` : ''}</div></div>`;
+    const actions = `<div class="card"><div class="p"><b>Actions</b><form method="post" action="/admin/topic/${r.id}/research"><button class="o">Research dobara chalao (0 token, sources + pre-read)</button></form><form method="post" action="/admin/topic/${r.id}/debate"><button class="o">Multi-AI debate chalao (token, cross-check + claim ledger)</button></form><form method="post" action="/admin/topic/${r.id}/write"><button class="g">Approve: iska article likho (AI token lagenge, 1-2 min)</button></form><p class="m">Write dabane par debate pehle apne aap chalega (agar 2 ghante me nahi chala). Sirf code-verified claim ledger writer ko milta hai. Debate ek baar chala to write me wahi reuse hota hai.</p></div></div>`;
+    return A('Topic', `<h1>${esc(r.query)}</h1><p><span class="tag">${esc(r.status)}</span> ${esc(r.traffic)}</p>${tmsg ? `<p class="note">${esc(tmsg)}</p>` : ''}${pv}${pre}${debateHtml}${actions}${d.errors && d.errors.length ? `<p class="note">Provider errors: ${esc(d.errors.join(' | '))} (koshish: ${d.tried || 0} outlets)</p>` : ''}${d.reject_reason ? `<p class="note">Reject karne ki wajah: ${esc(d.reject_reason)}</p>` : ''}${d.park_reason ? `<p class="note">Abhi ruka hai (baad mein dobara try hoga): ${esc(d.park_reason)}</p>` : ''}${d.card ? `<div class="card"><div class="p"><b>Card: ${esc(d.card.hook)}</b> <span class="tag">${esc(d.card.label || '')}</span><ul>${(d.card.facts || []).map((f) => `<li>${esc(f.text)} <span class="m">(${esc((f.outlets || []).join(', '))})</span></li>`).join('')}</ul>${r.status === 'card_live' ? `<p><a href="/card/${r.id}" target="_blank">Card post dekho: /card/${r.id}</a></p>` : `<form method="post" action="/admin/topic/${r.id}/card-post"><button class="g">Card post banao (chhota AI call, turant live)</button></form>`}</div></div>` : ''}${d.diag ? `<p class="note">Pichli koshish ka hisaab: overlap ${Math.round((d.diag.overlap || 0) * 100)}%, sabse lambi copy ${d.diag.longest || 0} shabd, score ${d.diag.score}. Claims: ${esc((d.diag.claimList || []).map((x) => (x.ok ? 'OK' : 'FAIL(' + (x.why || '') + ')') + ' ' + x.c).join(' | ').slice(0, 900))}</p>` : ''}${d.check ? `<p class="note">Checks: ${esc(JSON.stringify(d.check))}</p>` : ''}${(d.sources || []).map((s) => `<div class="card"><div class="p"><b>${esc(s.source)}</b><br><a href="${esc(/^https?:\/\//i.test(String(s.url || '')) ? s.url : '#')}" target="_blank" rel="noopener">${esc(s.title)}</a><p class="m">${esc(s.snippet)}</p><p class="m">${(s.text || '').length} akshar text</p></div></div>`).join('') || '<p>Research abhi baaki hai.</p>'}<p><a href="/admin/topics">Back</a></p>`);
   }
 
   const m = p.match(/^\/admin\/post\/(\d+)(\/action)?$/);
@@ -566,7 +620,7 @@ async function admin(req, env, p, url) {
     const li = (arr, icon, st) => arr.map((x) => `<p class="note"${st ? ` style="${st}"` : ''}>${icon} ${esc(x.msg)}</p>`).join('');
     const claimRows = ((ck && ck.claimList) || []).map((c) => `<li>${c.ok ? '&#10003;' : '&#10007;'} ${esc(c.c)}<br><span class="m">${esc(c.e)}</span></li>`).join('');
     const checkBlock = `<div class="card"><div class="p"><b>Publish se pehle jaanch</b>${vm ? `<p class="note">${esc(vm)}</p>` : ''}${li(vr.errors, '&#10060;', 'background:#fdecea;border-color:#f5c2c0')}${li(vr.warnings, '&#9888;&#65039;')}${vr.errors.length || vr.warnings.length ? '' : '<p class="m">Sab jaanch theek hain.</p>'}`
-      + `${ck ? `<p class="m">Fact-check: ${ck.supported}/${ck.claims} claims ka sabut sources mein mila, ${ck.fixRounds || 0} baar sudhaara gaya, copy overlap ${((ck.overlap || 0) * 100).toFixed(0)}%${ck.numbersNotInSources && ck.numbersNotInSources.length ? ' | sankhya sources mein nahi: ' + esc(ck.numbersNotInSources.join(', ')) : ''}${ck.latinNotInSources && ck.latinNotInSources.length ? ' | English naam sources mein nahi: ' + esc(ck.latinNotInSources.join(', ')) : ''}</p>${claimRows ? `<details><summary>Kya check hua (claim + sabut)</summary><ul>${claimRows}</ul></details>` : ''}` : '<p class="m">Is post ka fact-check record nahi hai.</p>'}</div></div>`;
+      + `${ck ? `<p class="m">Fact-check: ${ck.supported}/${ck.claims} claims ka sabut sources mein mila, ${ck.fixRounds || 0} baar sudhaara gaya, copy overlap ${((ck.overlap || 0) * 100).toFixed(0)}%${ck.numbersNotInSources && ck.numbersNotInSources.length ? ' | sankhya sources mein nahi: ' + esc(ck.numbersNotInSources.join(', ')) : ''}${ck.latinNotInSources && ck.latinNotInSources.length ? ' | English naam sources mein nahi: ' + esc(ck.latinNotInSources.join(', ')) : ''}</p>${claimRows ? `<details><summary>Kya check hua (claim + sabut)</summary><ul>${claimRows}</ul></details>` : ''}` : '<p class="m">Is post ka fact-check record nahi hai.</p>'}${ck && (ck.style || ck.debate) ? `<p class="m">Style guard: ${ck.style ? `${ck.style.score}/100${ck.style.penalty ? ` (${ck.style.penalty} points kate: ${esc((ck.style.notes || []).slice(0, 3).join('; '))})` : ''}` : 'n/a'}${ck.debate ? ` | Multi-AI debate: ${(ck.debate.stats && ck.debate.stats.verified) || 0} verified claims` : ''}</p>` : ''}</div></div>`;
     const btnF = (a, label, c = '') => `<form method="post" action="${act}"><input type="hidden" name="a" value="${a}"><input type="hidden" name="force" value="1"><button class="${c}">${label}</button></form>`;
     const approveBtns = vr.ok ? btn('approve_now', 'Approve + publish now', 'g') + btn('approve_random', 'Approve + publish at random time (within 1 hr)')
       : '<p class="note">Upar ki &#10060; galtiyan theek hone tak Approve band hai.</p>' + btnF('approve_now', 'Phir bhi approve + publish karo (meri zimmedari)', 'r');
