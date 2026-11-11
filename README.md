@@ -1,10 +1,13 @@
-# Virall — Cloudflare-only AI news site
+# Virall — Cloudflare-only AI business blog
 
 **Live:** https://virall.in
 
-Virall ek Hindi/English news + explainer site hai jo poori tarah **Cloudflare free tier** par chalti hai:
+Virall ek Hindi/English **business analysis** site hai jo poori tarah **Cloudflare free tier** par chalti hai:
 Workers (hosting + cron), D1 (database), Workers AI (images), KV (API usage counters).
 Koi VPS, koi paid database, koi npm dependency nahi. Paisa **Google AdSense** se aata hai.
+
+Business mode default me ON hai (`BUSINESS_MODE=true`). News pipeline code me maujood hai aur
+`BUSINESS_MODE=false` karke wapas chalu ki ja sakti hai — par default direction ab business hai.
 
 > **Sabse pehle:** `MONETIZATION.md` padho. Usme AdSense approval checklist, 30-day content plan
 > aur honest earning expectations hain.
@@ -17,6 +20,7 @@ Koi VPS, koi paid database, koi npm dependency nahi. Paisa **Google AdSense** se
 |---|---|
 | Worker + saare routes | `src/index.js` |
 | Topic discovery (Google Trends / News) | `src/trends.js` |
+| Business topic bank + frameworks + depth gate | `src/business.js` |
 | Zero-token source pre-read / reading brief | `src/preread.js` |
 | Multi-AI debate + code-checked claim ledger | `src/debate.js`, `src/claims.js` |
 | Duplicate check (SimHash/MinHash) | `src/similarity.js` + `post_fingerprints` table |
@@ -46,7 +50,7 @@ risky hai — isliye manual approve default hai.
 Zaroorat: **Node.js 22+** (Node 26 par test kiye gaye). `npm install` ki zaroorat nahi — koi dependency nahi hai.
 
 ```bash
-npm test          # 315 unit tests (network nahi, DB nahi)
+npm test          # 347 unit tests (network nahi, DB nahi)
 npm run check     # har src/*.js ko import karke syntax/import error pakadta hai
 npx wrangler dev  # local Worker (pehli baar Cloudflare login maangega)
 ```
@@ -144,6 +148,13 @@ koi key nahi chahiye. Sirf `PEXELS_API_KEY` / `YOUTUBE_API_KEY` na hone se photo
 | `INDEXNOW_KEY` | set | Bing/Yandex instant indexing. `/{key}.txt` auto serve hota hai. |
 | `POST_LANG` | `eng` | `eng`/`en` = English, warna Hindi. |
 | `TRENDS_GEO` | `IN` | Google Trends region. |
+| `BUSINESS_MODE` | `true` | ON = business blog pipeline (business news + evergreen topic bank, Wikipedia background source, business depth gate). `false` = purana news pipeline. |
+| `BUSINESS_LANG` | `en` | Default business article language (`en`/`hi`). Admin se per draft EN/HI chuna ja sakta hai. |
+| `BUSINESS_DAILY_LIMIT` | `3` | Business mode ka hard daily draft cap. Isse zyada draft ek din me nahi bante. |
+| `BUSINESS_MIN_WORDS` | `900` | Business article ki minimum depth (words). Gate 80% se neeche hard-fail karta hai. |
+| `BUSINESS_TOPIC_LIMIT` | `3` | Ek run me kitne naye business topics laane hain. |
+| `AUTO_DRAFT_QUEUE_MAX` | `6` | Auto-draft sirf tab chalta hai jab approve karne ke liye itne se kam drafts pending hon. |
+| `AUTO_DRAFT_MIN_SCORE` | `60` | Auto-draft is score se neeche wale business draft ko khud reject kar deta hai. |
 | `DAILY_TOPIC_LIMIT` | `10` | Roz max naye topics. |
 | `DAILY_POST_LIMIT` | `5` | Reserved for writer limits. |
 | `AUTO_APPROVE_HOURS` | `1` | Auto-publish switch ON ho to draft kitni der baad live ho. |
@@ -195,7 +206,7 @@ npx wrangler deploy
 Cron `0 * * * *` (har ghante) par ye kaam khud hota hai:
 1. `autoApprove` — sirf tab jab switch ON ho aur post strict checks pass kare.
 2. `pingIndexNow` — naye live posts Bing/Yandex ko bhejta hai.
-3. `collectTopics` — Google Trends se naye topics.
+3. `collectBusinessTopics` (business mode) ya `collectTopics` (news mode) — naye topics.
 4. `researchPending` — 2 topics ke sources jama karta hai.
 5. `writeOne` — sirf tab jab `auto_write` switch ON ho.
 
@@ -205,6 +216,19 @@ Pehli baar deploy ke baad:
 - Ek topic kholo → **Card banao** (0 token) → card dekho → **Approve: article likho**.
 - Draft review page par publish se pehle ki jaanch, image/video, sources dikhte hain.
 - **Human check form** bharo: article padho, zaroorat ho to `body` edit karo (ya 30+ akshar ka note likho), "maine 3 random facts sources se mila liye" tick karo, phir **Human-check ke saath approve + publish** dabao. Iske bina normal approve nahi chalega.
+
+- **Business** page kholo → "Naye business topics lao" (0 token) → Topics page se ek topic ka research chalao → wapas Business page par **Write English** ya **Write Hindi** dabao. Draft banne ke baad wahi human review/approval flow chalta hai.
+- Ek din me 3 se zyada business draft nahi bante (`BUSINESS_DAILY_LIMIT=3`) — quality over volume.
+
+### Auto-draft mode (AI likhe, tum sirf approve karo)
+
+`/admin` par **Auto-draft: ON** karo. Cron pehle se har ghante chalta hai (`crons = ["0 * * * *"]`), par usme safety rails hain:
+
+- Ek din me max `BUSINESS_DAILY_LIMIT` (3) drafts — 24 nahi. 24 AI posts/day AdSense ke "scaled content" rule aur free AI quota dono ke liye khatra hai.
+- Approval queue `AUTO_DRAFT_QUEUE_MAX` (6) drafts par ruk jati hai. Tumhare paas 6 pending drafts hain to cron naya draft nahi banayega.
+- Jo draft business depth gate fail kare ya `AUTO_DRAFT_MIN_SCORE` (60) se neeche ho, wo **auto-reject** ho jata hai — review queue me sirf achhe drafts aate hain.
+- Auto-publish abhi bhi OFF rakho. Tum har draft padhkar human-check form ke saath approve karo (2–3 min per post).
+- Har ghante ka result `/admin` par "Aakhri auto-draft koshish" me dikhta hai: draft bana, auto-reject, queue full, ya token nahi kharch hua.
 
 ### Admin click ka rule (time pass nahi)
 
@@ -243,7 +267,8 @@ Pehli baar deploy ke baad:
 | `/sitemap.xml`, `/news-sitemap.xml`, `/feed.xml`, `/robots.txt`, `/ads.txt` | SEO / ads |
 | `/{INDEXNOW_KEY}.txt` | IndexNow verification |
 | `/admin` | Login + dashboard |
-| `/admin/topics`, `/admin/topic/<id>` | Trends, research, card, write |
+| `/admin/topics`, `/admin/topic/<id>` | Trends, research, card, write (EN/HI business) |
+| `/admin/business` | Business topics, EN/HI draft buttons, daily cap |
 | `/admin/post/<id>` | Review, media refresh, approve/reject/delete |
 | `/admin/new` | Manual draft |
 | `/admin/ai-test` | AI provider test |
@@ -252,6 +277,28 @@ Pehli baar deploy ke baad:
 ---
 
 ## 8. Content pipeline (short)
+
+**Business mode (default):**
+
+```
+Google Business News + evergreen BUSINESS_TOPIC_BANK (rotated daily)
+        │  (same BLOCK + JUNK + script filter; 0 token)
+        ▼
+topics table (research.mode = "business")
+        │
+        ▼
+research: Bing News + GDELT + Google News + Wikipedia background
+        ▼
+pre-read (0 token) ─► preflight (business: 2 sources, no freshness requirement)
+        ▼
+writer: business prompt (framework + counterpoint + playbook + risks + honesty)
+        → copy check → AI editor/fact-check → business depth gate (code)
+        → derived-number check (A / B = C) → score (cap 94) → DRAFT
+        ▼
+admin review (EN/HI available) → human edit + approve → live
+```
+
+**News mode (`BUSINESS_MODE=false`):**
 
 ```
 Google Trends / Google News
@@ -289,6 +336,11 @@ Safety rules jo code me already hain:
 - **Duplicate se pehle block:** same headline/story ka post pehle se ho to topic `duplicate` hota hai aur AI token nahi lagta. `post_fingerprints` table purane posts ke liye khud bhi ban jati hai.
 - **Style guard:** stock AI phrases aur machine-jaisa sentence rhythm score penalty laata hai, taaki content human jaisa rahe.
 - Har post par sources list + "AI ki madad se taiyar" disclaimer.
+- **Business mode ka extra gate:** article me named framework, unit economics/cash engine, strong counterpoint,
+  operator playbook, risks aur "what is not confirmed" hona chahiye. Guarantee/risk-free/get-rich language
+  aur stock tips (`buy`, `target price`, `multibagger`) hard-block hain. Calculation tabhi allowed hai jab
+  `A / B = C` ke inputs sources me hon aur arithmetic sahi ho (`derivedNumbers`).
+- Business articles par public "Business analysis, not investment advice" box har article me dikhta hai.
 
 ---
 
@@ -298,10 +350,12 @@ Safety rules jo code me already hain:
 npm test
 ```
 
-315 tests in 19 files (`preread`, `validate`, `writer`, `editor`, `playbook`, `verify`, `facts`, `cardpost`, `media`,
-`trends`, `ai`, `api-manager`, `seo-optimizer`, `index`, `claims`, `similarity`, `style`, `debate`, `quality-layers`). Sab pure functions / fake KV / fake fetch -
+347 tests in 21 files (`preread`, `validate`, `writer`, `editor`, `playbook`, `verify`, `facts`, `cardpost`, `media`,
+`trends`, `ai`, `api-manager`, `seo-optimizer`, `index`, `claims`, `similarity`, `style`, `debate`, `quality-layers`, `business`, `autodraft`). Sab pure functions / fake KV / fake fetch -
 koi network call nahi, koi real DB nahi. `quality-layers` conflicts, originality, specificity, voice, fact
 registry, corrections aur source liveness ko cover karta hai (in-memory SQLite se, network nahi).
+`business` topic bank, frameworks, prompt, depth gate, derived arithmetic aur Business publish rules cover karta hai.
+`autodraft` approval-queue cap aur auto-reject rules cover karta hai.
 `npm run check` har module import karke toota hua import/syntax pakadta hai.
 
 ---
@@ -326,6 +380,10 @@ registry, corrections aur source liveness ko cover karta hai (in-memory SQLite s
 - **Koi user account / comments / newsletter nahi.** Sab kuch anonymous + static.
 - **Free tier limits:** Workers AI neurons, D1 rows, KV writes — bade traffic par
   paid plan ya caching strategy chahiye hogi.
+- **3 deep business articles/day free AI keys par realistic upper bound hai.** Ek article me
+  debate + draft + editor + fact-check milakar roughly 20,000–30,000 tokens lag sakte hain.
+  Pehle 1–2 articles/day se shuru karo, quality check karo, phir cap tak badhao. 10 thin posts
+  se ek deep post behtar hai — AdSense bhi yahi dekhta hai.
 
 ---
 

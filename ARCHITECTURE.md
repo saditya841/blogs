@@ -1,8 +1,9 @@
 # Virall — Architecture (A + B + C)
 
-Ye document batata hai ki Virall kaise kaam karta hai: trends → research → 0-token pre-read →
-multi-AI debate + cross-check → claim ledger (code verified) → human-style article → duplicate/style/originality/voice
-check → SEO → DRAFT → human edit + 3-fact check → live → corrections. Sab kuch **Cloudflare free tier** par chalta hai.
+Ye document batata hai ki Virall kaise kaam karta hai: business/news topics → research → 0-token pre-read →
+multi-AI debate + cross-check → claim ledger (code verified) → human-style article (business mode me framework +
+counterpoint + playbook) → duplicate/style/originality/voice/business-depth check → SEO → DRAFT → human edit +
+3-fact check → live → corrections. Sab kuch **Cloudflare free tier** par chalta hai.
 
 Aakhri update: 11 Nov 2026 | Code: `src/*.js` | DB: D1 `virall-db` | Deploy: Cloudflare Workers
 
@@ -112,7 +113,9 @@ Aakhri update: 11 Nov 2026 | Code: `src/*.js` | DB: D1 `virall-db` | Deploy: Clo
 | File | Kaam | Network/AI? |
 |---|---|---|
 | `src/index.js` | Public site, SEO pages, sitemap/RSS, admin UI + routes | D1 |
-| `src/trends.js` | Trends ×2 + News parallel, junk filter, research one topic | Yes (free, no AI) |
+| `src/trends.js` | Trends ×2 + News parallel, junk filter, business topic collection, research one topic | Yes (free, no AI) |
+| `src/business.js` | Business topic bank, 13 frameworks, operator prompt, depth gate, derived arithmetic | No |
+| `src/autodraft.js` | Hourly auto-draft safety rails: approval-queue cap, auto-reject low-quality business drafts | No |
 | `src/preread.js` | 0-token reading brief: language, relevance, facts, allowed numbers, gaps | No |
 | `src/facts.js` | 2+ outlet agreed facts, date/number keys | No |
 | `src/verify.js` | injection check, shingles, grounded claims, numbers/names not in sources | No |
@@ -269,6 +272,85 @@ par review page par "verify manually" dikhta hai.
 
 ---
 
+## 6c. Business mode (default direction)
+
+`BUSINESS_MODE=true` ek **additive branch** hai — news pipeline code delete nahi hui. Business branch
+tab chalti hai jab env switch ON ho ya topic ke `research.mode === "business"` ho.
+
+### Topics (0 token)
+
+`business.js` me ~48 evergreen, India-first queries ka `BUSINESS_TOPIC_BANK` hai (DMart, Zerodha, Amul,
+quick commerce, kirana economics, MSME cash flow, SaaS pricing, etc.). Har entry me `angle` + `framework`.
+`trends.js::collectBusinessTopics` ye do jagah se topics laata hai:
+
+1. Google Business News RSS (fresh headlines),
+2. topic bank, din ke hisaab se rotate (same topic baar-baar nahi).
+
+`BUSINESS_TOPIC_LIMIT` (3) + `DAILY_TOPIC_LIMIT` room ka rule lagta hai; `INSERT OR IGNORE` duplicate
+query ko rokta hai. Research me news providers ke saath **Wikipedia background** source judta hai
+(context ke liye; koi number isi se "verified" nahi hota).
+
+### Writing contract
+
+`businessMessages()` AI ko operator ki tarah sochna sikhata hai (first principles, inversion, base rates,
+incentives, second-order effects, margin of safety, constraint). Required structure:
+
+```
+## The setup  →  ## The money engine  →  ## Framework: <named>  →  ## The counterpoint
+→  ## Operator playbook  →  ## What could go wrong  →  ## What is not confirmed  →  ## Analysis
+```
+
+Rules prompt me + code me:
+
+- har number/naam/date source ya code-checked ledger me hona chahiye,
+- calculation sirf `A / B = C` form me, inputs sourced aur arithmetic sahi,
+- estimate ko "estimate" likhna,
+- guarantee / risk-free / get-rich / stock tip / target price / multibagger = **hard block**.
+
+### Code gate (`businessGate`)
+
+0-token check: words (default 900, 80% hard floor), 6–8 headings, 3+ numbers, named framework,
+counterpoint, playbook, risks, honesty section, India context, generic-AI phrases. Score 100 se shuru,
+har missing layer par penalty; `guarantee` -30, `stock_tip` -25. `ok` ke liye score 70+, hard-fail nahi,
+words floor aur 5+ headings zaroori.
+
+`derivedNumbers()` article ke `A / B = C` patterns ko sources ke numbers se match karta hai; sirf tab
+result allow hota hai jab inputs sources me hon aur arithmetic 2% tolerance ke andar sahi ho.
+
+### `check_json.business`
+
+```json
+{
+  "ok": true, "score": 86, "words": 1042, "headings": 8, "numbers": 7,
+  "framework": true, "counterpoint": true, "playbook": true, "risks": true,
+  "honesty": true, "india": true,
+  "errors": [], "warnings": []
+}
+```
+
+Business posts `validate.js` me extra rules paate hain: guarantee/stock-tip errors publish block karte
+hain; shallow depth warning hai (human fix kar sakta hai); `strict` auto-publish me depth fail block hai.
+Public article page par hamesha "Business analysis, not investment advice" box dikhta hai.
+
+### Limits
+
+- `BUSINESS_DAILY_LIMIT=3` (hard cap), `BUSINESS_MIN_WORDS=900`, `BUSINESS_TOPIC_LIMIT=3`.
+- `BUSINESS_LANG` default `en`; admin per draft EN ya HI chun sakta hai. Research language alag hoti hai.
+- Human approval abhi bhi mandatory hai. Auto-publish default me off (`SCORE_MAX=94 < 95`).
+
+### Auto-draft (hourly cron, human approve)
+
+Cron trigger pehle se `0 * * * *` hai. `auto_write=1` hone par `scheduled()` har ghante ek draft try karta hai,
+lekin `autodraft.js` do hard rails lagata hai:
+
+1. `posts WHERE status='draft'` ki ginti `AUTO_DRAFT_QUEUE_MAX` (6) se kam honi chahiye, warna AI call hi nahi hoti.
+2. Draft banne ke baad `businessOk` false ya `score < AUTO_DRAFT_MIN_SCORE` (60) ho to post `rejected` ho jata hai.
+
+Isliye "har ghante" ka matlab 24 posts/day nahi — max `BUSINESS_DAILY_LIMIT` (3) quality drafts/day, aur
+review queue kabhi 6 se zyada nahi hoti. Auto-publish ON karne ki zaroorat nahi; human gate chalu rehta hai.
+
+---
+
 ## 7. Free API stack aur limits (ground reality)
 
 | Service | Free use | Limit ka dhyan |
@@ -290,13 +372,15 @@ par review page par "verify manually" dikhta hai.
 |---|---|
 | 3 debate roles | 2,000–4,000 |
 | Judge cross-exam | 1,000–1,800 |
-| Writer draft | 5,000–7,000 |
-| Editor + factual claims | 5,000–7,000 |
-| Rewrite retry (kabhi-kabhi) | 5,000–7,000 |
-| **Total typical** | **~40,000–55,000** |
+| Business writer draft | 5,000–8,000 |
+| Editor + factual claims | 5,000–8,000 |
+| Rewrite retry (kabhi-kabhi) | 5,000–8,000 |
+| **Business total typical** | **~20,000–35,000** |
+| **News total typical** | **~40,000–55,000** |
 
-Isliye `DAILY_POST_LIMIT=5` rakha hai. Free tier par realistically **3–5 solid articles/day**,
-10 nahi. `DEBATE_ENABLED=false` karke token bacha sakte ho, par quality gate kam ho jayega.
+Business mode me `BUSINESS_DAILY_LIMIT=3` hai — free keys par realistically **2–3 deep articles/day**,
+10 nahi. News mode (`BUSINESS_MODE=false`) me `DAILY_POST_LIMIT=5` rehta hai. `DEBATE_ENABLED=false`
+karke token bacha sakte ho, par quality gate kam ho jayega.
 
 **Koi artificial wait/sleep nahi:** network calls ke hard deadlines hain (research 10s, article text
 6s, debate 45s), timeout par kaam aage badhta hai — page hang nahi hota.
@@ -307,6 +391,9 @@ Isliye `DAILY_POST_LIMIT=5` rakha hai. Free tier par realistically **3–5 solid
 
 | Button | Kya hota hai | Token |
 |---|---|---|
+| **Auto-draft ON** (dashboard) | Har ghante cron try karta hai; max 3/day, queue 6 par rukti hai, low score auto-reject | AI |
+| **Naye business topics lao** (Business page) | Google Business News + rotated topic bank; duplicate-safe insert | 0 |
+| **Write English / Write Hindi** (Business page, topic page) | Business prompt → debate → draft → depth gate → image → DRAFT | AI |
 | **Abhi trends + research chalao** | Naye topics + ek pending topic research, phir us topic ka page | 0 |
 | **Agla pending topic research karo** | 1 topic; pending na ho to purana `thin`, phir stale `ready` refresh | 0 |
 | **Card banao** | Us topic ka page kholta hai (card button wahan) | 0 |
@@ -397,7 +484,14 @@ corrections(id, post_id, old_text, new_text, reason, created_at)
 | `SITE_URL` | `https://virall.in` | Canonical URL, schema, sitemap |
 | `POST_LANG` | `eng` | `en`/`eng` = English, warna Hindi |
 | `DAILY_TOPIC_LIMIT` | `10` | Ek din me max naye topics |
-| `DAILY_POST_LIMIT` | `5` | Ek din me max drafts |
+| `DAILY_POST_LIMIT` | `5` | Ek din me max drafts (news mode) |
+| `BUSINESS_MODE` | `true` | Business pipeline on/off (false = news pipeline) |
+| `BUSINESS_LANG` | `en` | Default business output language (`en`/`hi`) |
+| `BUSINESS_DAILY_LIMIT` | `3` | Business mode ka hard daily draft cap |
+| `BUSINESS_MIN_WORDS` | `900` | Business article depth floor (80% hard fail) |
+| `BUSINESS_TOPIC_LIMIT` | `3` | Ek run me naye business topics |
+| `AUTO_DRAFT_QUEUE_MAX` | `6` | Auto-draft tabhi chalta hai jab isse kam drafts pending hon |
+| `AUTO_DRAFT_MIN_SCORE` | `60` | Isse neeche wale auto-draft ko khud reject kar do |
 | `SCORE_MAX` | `94` | Auto-publish cap (95 se neeche) |
 | `AUTO_APPROVE_MIN_SCORE` | `95` | Auto-publish threshold |
 | `DEBATE_ENABLED` | `true` | Multi-AI debate on/off |
@@ -559,10 +653,12 @@ baaki tables `IF NOT EXISTS` hain.
 
 ## 16. Test coverage
 
-- `npm test` → **315 pass, 0 fail** (80 suites, 19 files)
-- `npm run check` → **29/29 modules load**
+- `npm test` → **347 pass, 0 fail** (88 suites, 21 files)
+- `npm run check` → **31/31 modules load**
 
 New tests: `claims`, `similarity`, `style`, `debate` (ledger, duplicate, human-style, safe roles,
-provider rotation, judge fallback, timeouts, no-source/less-roles failures) aur `quality-layers`
+provider rotation, judge fallback, timeouts, no-source/less-roles failures), `quality-layers`
 (conflicts, originality, specificity, voice, fact registry, corrections, source liveness — in-memory
-SQLite D1 adapter se, koi network nahi).
+SQLite D1 adapter se, koi network nahi), `business` (topic bank rotation, prompt structure,
+depth gate, guarantee/stock-tip block, derived arithmetic, business preflight, Business publish rules)
+aur `autodraft` (approval-queue cap, auto-reject on depth-gate/score fail, broken env values).

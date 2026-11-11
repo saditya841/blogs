@@ -25,7 +25,7 @@ id = "6dce422731e44a45b993d1a46a7a0ab9"
 [vars]
 SITE_URL = "https://virall.in"
 SITE_NAME = "Virall"
-SITE_TAGLINE = "Trending khabrein, saaf aur sourced"
+SITE_TAGLINE = "Business samajh, numbers ke saath"
 AUTHOR_NAME = "Virall Desk"
 CONTACT_EMAIL = "saditya841@gmail.com"
 ADSENSE_PUB = ""
@@ -38,6 +38,19 @@ DAILY_TOPIC_LIMIT = "10"
 DAILY_POST_LIMIT = "5"
 POST_LANG = "eng"
 TRENDS_GEO = "IN"
+
+# Business content mode (additive: news pipeline stays available if this is false).
+# 3 deep articles/day is the target: BUSINESS_DAILY_LIMIT is a hard cap, not a quota.
+BUSINESS_MODE = "true"
+BUSINESS_LANG = "en"
+BUSINESS_DAILY_LIMIT = "3"
+BUSINESS_MIN_WORDS = "900"
+BUSINESS_TOPIC_LIMIT = "3"
+
+# "AI drafts, human approves" safety rails (only used when auto_write is ON in admin).
+# Hourly cron already exists; these stop a 24-drafts/day content farm and keep the review queue small.
+AUTO_DRAFT_QUEUE_MAX = "6"
+AUTO_DRAFT_MIN_SCORE = "60"
 # Workers AI still available as fallback
 AI_MODEL = "@cf/openai/gpt-oss-20b"
 

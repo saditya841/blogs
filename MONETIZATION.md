@@ -11,14 +11,16 @@ AdSense approval **automatic nahi** hai aur AI-generated news sites par sabse zy
 uthate hain. Google ki policies me "scaled content abuse" / "low-value content" ka matlab hai:
 bahut si pages jo mainly kisi aur ka content re-write karti hain, bina original value ke.
 
-Is site ka current model (Trends → research → AI draft → publish) **bilkul wahi shape** hai
-jise Google dekh kar reject kar sakta hai. Isliye:
+Is site ka current model ab **business analysis** hai (Trends → research → AI draft → human review),
+aur ye news se better hai kyunki explainer/analysis pages zyada der tak search me rehte hain. Lekin
+"scaled content abuse" / "low-value content" ka risk phir bhi hai agar har post same template jaisa lage. Isliye:
 
 - **Har post human review ke baad hi publish karo.** Code me auto-publish default OFF hai —
   ise ON mat karo jab tak quality aur traffic dono stable na ho jayein.
-- Har article me **original value** dalo: 2-3 line ka apna analysis, "iska matlab kya hai",
-  local angle, timeline, ya comparison table. Sirf press release ko dobara mat likho.
+- Har article me **original value** dalo: named framework, unit economics, counterpoint, operator
+  playbook aur "kya confirm nahi hai" section. Business mode ye structure code se enforce karta hai.
 - **Sources + correction policy + real contact** already hain — inhe aur visible rakho.
+- Koi stock tip, target price, guaranteed return ya get-rich language **kabhi nahi** — ye hard block hai.
 - Agar 30-40 achhe posts ke baad bhi reject ho, to 2-3 mahine content quality par kaam karo,
   phir apply karo. Baar-baar apply karne se fayda nahi.
 
@@ -51,6 +53,7 @@ zyada return milega.
 - [x] IndexNow (Bing/Yandex instant indexing)
 - [x] Human review queue + strict publish checklist (`validate.js`)
 - [x] YMYL (paisa/sehat ki salah) auto-block, junk/unsafe topics filter
+- [x] Business mode: business topic bank, 900+ words, framework/counterpoint/playbook/risks gate, stock-tip + guarantee hard block, "not investment advice" box
 - [x] Image safety: ambiguous topics par galat stock photo nahi, AI illustration
 - [x] Readable Hindi slugs (pehle `post-0lz57` jaisa tha)
 
@@ -61,7 +64,7 @@ zyada return milega.
 ### Site par
 
 - [ ] **Domain live + HTTPS** (virall.in already Cloudflare par hai)
-- [ ] **20-30 quality posts** live (600-900 words, 3+ sources, images, apna analysis)
+- [ ] **20-30 quality posts** live (business analysis: 900-1,300 words, 2+ sources, images, apna framework/analysis)
 - [ ] Homepage par clear navigation + categories
 - [ ] About page par **real editor/owner** ki info (naam, kaam, contact) — "Virall Desk"
       ke saath ek real naam add karna better hai
@@ -146,36 +149,36 @@ consent/cookie complications kam. AdSense ke apne reports alag honge.
 
 ## 6. 30-day content + traffic plan
 
-**Target:** 30-40 strong posts, 3-4 hafte me. Roz 1-2, par quality fix pehle.
+**Target:** 20-30 strong business posts, 3-4 hafte me. Roz 1-2 (max 3), par quality fix pehle.
+Ek 1,000-word deep post 5 thin posts se zyada value deta hai.
 
 ### Week 1 — purana content theek karo
-- Live 11 posts padho. Jo galat image, weak title, ya sirf press-release summary hain —
+- Live posts padho. Jo galat image, weak title, ya sirf press-release summary hain —
   unhe edit karo ya delete karo.
-- Har post me 2-3 line ka **"Iska matlab kya hai"** section add karo.
-- Purane `post-xxxxx` type URLs ko naye readable slug par redirect karo (agar possible ho;
-  warna naye posts par focus).
-- Categories clean karo: 6-8 hi rakho.
+- News-only posts ko business category me mat daalo; unhe re-purpose karo ya hatao.
+- Har business post me **framework + counterpoint + operator playbook** section check karo.
+- Categories clean karo: Business + 4-5 hi rakho.
 
-### Week 2 — 10 original explainers
-- Trends ke top topics chuno, par sirf wahi jinke 3+ achhe sources hon.
-- Har post: 600-900 words, 3+ sources, 1 image, 2+ internal links, clear headings.
-- Paisa/sehat/crime/sex jaise YMYL topics **manual** likho ya skip karo.
+### Week 2 — 8-10 deep business explainers
+- Business page se topics lao, phir research chalao; sirf 2+ achhe sources wale topics likho.
+- Har post: 900-1,300 words, 6-8 headings, 3+ sourced numbers, 1 image, 2+ internal links.
+- Stock tips / target price / guaranteed return **kabhi nahi** — sirf model analysis.
 - Har post ke end me source list + correction link.
 
-### Week 3 — 10 aur + Discover-ready
+### Week 3 — 8-10 aur + Discover-ready
 - 1200x675 image (AI illustration ya licensed photo), fresh publish time.
-- Headline me curiosity + specific number/place; clickbait nahi.
+- Headline me specific company/number, clickbait nahi.
 - Har post ko WhatsApp/Telegram/X par share karo; apna channel banao.
 - Google Discover ke liye `max-image-preview:large` already set hai.
 
 ### Week 4 — apply + measure
 - GSC me indexing check karo; jo pages index nahi hue unhe inspect karo.
-- AdSense apply karo (agar 20+ solid posts hain).
+- AdSense apply karo (agar 20+ solid business posts hain).
 - Cloudflare Analytics me top pages dekho; jo chal rahe hain unke similar 5 aur banao.
 - AdSense approval ke baad `ADSENSE_PUB` + slots set karo, deploy, `ads.txt` verify.
 
 ### Ongoing (daily 30 min)
-- 1 post publish ya 1 purana post improve.
+- 1 business post publish ya 1 purana post improve.
 - 1 social share.
 - GSC me naye queries dekhna.
 - Comment/email/correction ka jawab dena.
