@@ -1,10 +1,10 @@
 # Virall — Architecture (A + B + C)
 
 Ye document batata hai ki Virall kaise kaam karta hai: trends → research → 0-token pre-read →
-multi-AI debate + cross-check → claim ledger (code verified) → human-style article → duplicate/style
-check → SEO → DRAFT → human approval. Sab kuch **Cloudflare free tier** par chalta hai.
+multi-AI debate + cross-check → claim ledger (code verified) → human-style article → duplicate/style/originality/voice
+check → SEO → DRAFT → human edit + 3-fact check → live → corrections. Sab kuch **Cloudflare free tier** par chalta hai.
 
-Aakhri update: 10 Nov 2026 | Code: `src/*.js` | DB: D1 `virall-db` | Deploy: Cloudflare Workers
+Aakhri update: 11 Nov 2026 | Code: `src/*.js` | DB: D1 `virall-db` | Deploy: Cloudflare Workers
 
 ---
 
@@ -75,6 +75,15 @@ Aakhri update: 10 Nov 2026 | Code: `src/*.js` | DB: D1 `virall-db` | Deploy: Clo
 └───────────────────────────────┬──────────────────────────────────────────┘
                                 ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
+│ 7b. QUALITY LAYERS (0 token)                                             │
+│    originality.js → 6-word runs vs sources (copied share)               │
+│    specificity.js → naam/number/tareekh per 100 words                    │
+│    voice.js       → last 10 approved posts se rhythm drift               │
+│    conflicts.js   → do outlets ke alag numbers = claim `conflict`        │
+│    → total penalty cap 20; check_json me scores + `unconfirmed` list      │
+└───────────────────────────────┬──────────────────────────────────────────┘
+                                ▼
+┌──────────────────────────────────────────────────────────────────────────┐
 │ 8. MEDIA + SEO (mostly 0 token)                                          │
 │    AI/stock image → fail? branded SVG news-card (0 token, guaranteed)    │
 │    thumbnail, meta description, keywords, NewsArticle schema             │
@@ -87,9 +96,12 @@ Aakhri update: 10 Nov 2026 | Code: `src/*.js` | DB: D1 `virall-db` | Deploy: Clo
 └───────────────────────────────┬──────────────────────────────────────────┘
                                 ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
-│ 10. HUMAN APPROVAL                                                       │
-│     /admin/post/<id> → "Publish se pehle jaanch" (claims + style + media)│
-│     Approve = live. Auto-publish default OFF (SCORE_MAX=94 < 95).        │
+│ 10. HUMAN CHECK + APPROVAL                                               │
+│     /admin/post/<id> → claims + quality scores + unconfirmed + sources   │
+│     body edit (200+ chars) ya 30+ char note + "3 facts mile" checkbox    │
+│     → source recheck (404/410/451) → publish → facts registry + history  │
+│     Auto-publish bhi human_edited_at ke bina nahi chalta.                │
+│     Live post par `Update (date)` corrections line + /corrections page.  │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -105,8 +117,15 @@ Aakhri update: 10 Nov 2026 | Code: `src/*.js` | DB: D1 `virall-db` | Deploy: Clo
 | `src/facts.js` | 2+ outlet agreed facts, date/number keys | No |
 | `src/verify.js` | injection check, shingles, grounded claims, numbers/names not in sources | No |
 | `src/debate.js` | 3 neutral AI roles + judge, provider rotation, timeouts | AI |
-| `src/claims.js` | Claim ledger: parse, evidence match, outlet count, verified/single-source/unsupported | No |
-| `src/writer.js` | Duplicate gate → debate → draft → copy check → editor → style → image → SEO → D1 | AI |
+| `src/claims.js` | Claim ledger: parse, evidence match, outlet count, verified/single-source/unsupported/conflict | No |
+| `src/conflicts.js` | Same fact ke do alag numbers (outlet vs outlet) pakadta hai | No |
+| `src/originality.js` | 6-word runs se originality score (sources se kitna alag likha) | No |
+| `src/specificity.js` | 100 shabd par naam/number/tareekh (thos reporting vs filler) | No |
+| `src/voice.js` | Last 10 approved posts ka voice profile + naye draft ka drift | No |
+| `src/factregistry.js` | Verified facts + outlets + last_verified, stale-fact detection | D1 |
+| `src/corrections.js` | Public corrections + dated Update line | D1 |
+| `src/sourcecheck.js` | Approve se pehle source link liveness (404/410/451 dead) | Yes (free) |
+| `src/writer.js` | Duplicate gate → debate → draft → copy check → editor → style/originality/specificity/voice → image → SEO → D1 | AI |
 | `src/editor.js` | Editor + claim evidence pass, code decides `verified` | AI |
 | `src/similarity.js` | SimHash/MinHash fingerprint + `post_fingerprints` DB helpers | No |
 | `src/style.js` | Human-like writing guard (banned phrases, rhythm, repetition) | No |
@@ -198,6 +217,58 @@ Iske liye **koi extra AI call nahi** hoti.
 
 ---
 
+## 6b. Quality layers + human gate + corrections (0 token)
+
+Style guard ke baad writer teen aur **pure-code** layers chalata hai. Sabka penalty ek hi
+`qualityPenalty` me judta hai, par **total cap 20 points** hai — isliye ek layer doosri ko
+chhupa nahi sakti.
+
+| Layer | File | Kya pakadta hai | Penalty |
+|---|---|---|---|
+| Originality | `originality.js` | Sources ke saath 6-word runs; copied share `ORIGINALITY_TARGET` (0.85) se kam | 0–8 |
+| Specificity | `specificity.js` | 100 shabd par naam/number/tareekh; 3 se kam (vague) ya 10 se zyada (press-release list) | 0–6 |
+| Voice | `voice.js` | Last 10 approved posts ka sentence rhythm; naye draft ka drift | 0–6 |
+| Style | `style.js` | AI phrases + flat rhythm (upar section 6) | 0–15 |
+
+Scores `check_json` me save hote hain: `originality`, `specificity`, `voice`, `quality`.
+Specificity aur originality me sirf **counts** jate hain (numbers/names ki list), isliye review
+page par admin ko wahi cheezein dikhti hain jo code ne gini.
+
+### Conflicts (do outlet, do sach)
+
+Agar ek hi fact ke do alag numbers/units milte hain (`1200 crore` vs `2100 crore`), to claim
+`conflict` banta hai — **na verified, na unsupported**. Writer ko prompt me bola jata hai:
+"reports differ" likho ya number chhodo. Post review page par `unconfirmed` box me dono outlets
+ka version dikhta hai. Ye AdSense ki "misleading content" policy ka sabse bada bachav hai.
+
+### Human gate (`REQUIRE_HUMAN_EDIT=true`)
+
+Draft publish karne ke liye admin ko **do me se ek** karna hoga:
+
+1. Body me 200+ akshar ka real change (typo fix count nahi hota), **ya**
+2. 30+ akshar ka check-note ("3 facts Outlook/Bhaskar se mile").
+
+Saath me checkbox: *"maine 3 random facts sources se mila liye"*. Tab `human_edited_at` set hota
+hai aur usi click par publish hota hai. `auto_publish` bhi `human_edited_at` ke bina nahi chalta.
+`force` se bypass sirf debugging ke liye hai.
+
+### Source recheck
+
+Publish se pehle `sourcecheck.js` top 3 source links kholta hai (3s timeout). `404/410/451` = dead;
+2+ dead links publish rok dete hain. `403`/timeout = `unknown` — article unfairly block nahi hota,
+par review page par "verify manually" dikhta hai.
+
+### Fact registry + corrections
+
+- `facts` / `fact_sources` / `post_facts` me code-verified facts + outlets + `last_verified` save hote hain.
+- `FACT_MAX_AGE_HOURS` (24) se purane facts review page par "re-check pending" warning dete hain;
+  **Facts aaj verify kiye** click timestamp update karta hai (0 token).
+- `corrections` table public history rakhta hai. Admin review page se correction darj karta hai;
+  article ke neeche dated `Update (YYYY-MM-DD)` line judti hai aur `/corrections` par sab dikhta hai.
+- `/author` par desk identity, `/news-sitemap.xml` par last 48h posts.
+
+---
+
 ## 7. Free API stack aur limits (ground reality)
 
 | Service | Free use | Limit ka dhyan |
@@ -244,7 +315,11 @@ Isliye `DAILY_POST_LIMIT=5` rakha hai. Free tier par realistically **3–5 solid
 | **Multi-AI debate chalao** (topic page) | 3 roles + judge + code ledger preview | AI |
 | **Approve: iska article likho** | Wahi debate reuse (2h), phir draft | AI |
 | **Card post banao** | Chhota AI call, `/card/<id>` par turant live | AI |
-| **Approve + publish** (post page) | Validation + live | 0 |
+| **Human-check ke saath approve + publish** (post page) | Body edit/note + 3-fact checkbox + source recheck + publish | 0 |
+| **Sources dobara check karo** (post page) | Top 3 links ki liveness + timestamp | 0 |
+| **Facts aaj verify kiye** (post page) | Registry timestamp update, stale warning hat jati hai | 0 |
+| **Correction darj karo** (post page) | `corrections` row + public Update line | 0 |
+| **Approve + publish** (force) | Human gate bypass — sirf debugging ke liye | 0 |
 
 Failure par message me saaf likha hota hai: **`Token kharch nahi hua`** ya **`Token laga`**.
 
@@ -257,7 +332,8 @@ Failure par message me saaf likha hota hai: **`Token kharch nahi hua`** ya **`To
 ```sql
 posts(id, slug, title, summary, body, category, tags, lang, image_url, image_credit, video_url,
       sources, score, word_count, pinged, check_json, status, publish_at, created_at, updated_at,
-      featured_image, thumbnail_image, og_image, seo_score, meta_description, meta_keywords, schema_json)
+      featured_image, thumbnail_image, og_image, seo_score, meta_description, meta_keywords, schema_json,
+      human_edited_at, human_edit_note)
 
 topics(id, query, traffic, status, research, source_count, created_at, updated_at)
 -- status: new | ready | thin | drafted | duplicate | rejected | card_live
@@ -265,6 +341,10 @@ topics(id, query, traffic, status, research, source_count, created_at, updated_a
 images(id, mime, b64, created_at)                 -- /img/<id>.jpg|.svg
 settings(k, v)                                    -- auto_write / auto_publish / last_write
 post_fingerprints(post_id, simhash, title_simhash, title_hash, minhash, tokens, title, created_at)
+facts(id, topic_id, text, status, first_seen, last_verified)
+fact_sources(fact_id, source, url, date)
+post_facts(post_id, fact_id)
+corrections(id, post_id, old_text, new_text, reason, created_at)
 ```
 
 ### `check_json` (post ke andar)
@@ -280,8 +360,14 @@ post_fingerprints(post_id, simhash, title_simhash, title_hash, minhash, tokens, 
   "overlap": 0.04,
   "preread": {"ok": true, "quality": 88, "facts": 5, "agreed": 3},
   "style": {"score": 97, "penalty": 3, "notes": ["..."]},
+  "originality": {"score": 0.94, "copied": 1, "total": 18, "penalty": 0},
+  "specificity": {"score": 92, "penalty": 1, "per100": 4.6, "numbers": ["..."], "names": ["..."]},
+  "voice": {"score": 100, "penalty": 0, "compared": true},
+  "quality": {"penalty": 4, "style": 3, "originality": 0, "specificity": 1, "voice": 0},
+  "unconfirmed": [{"kind": "conflict", "text": "project cost ...", "detail": "Outlook: 1200 crore, Bhaskar: 2100 crore"}],
+  "source_check": {"at": 0, "checked": 3, "okCount": 3, "dead": [], "unknown": []},
   "duplicate": {"checked": true, "score": 0.41, "duplicate": false},
-  "debate": {"ok": true, "stats": {"verified": 4, "singleSource": 2, "unsupported": 1}}
+  "debate": {"ok": true, "stats": {"verified": 4, "singleSource": 2, "unsupported": 1, "conflict": 1}}
 }
 ```
 
@@ -292,13 +378,13 @@ post_fingerprints(post_id, simhash, title_simhash, title_hash, minhash, tokens, 
   "sources": [{"source": "...", "url": "...", "date": 0, "text": "..."}],
   "brief": {"version": 1, "ok": true, "stats": {}, "facts": [], "gaps": [], "briefText": "..."},
   "dropped": [{"source": "...", "reason": "..."}],
-  "debate": {"ok": true, "roles": [], "ledger": {"verified": [], "singleSource": [], "unsupported": []}},
+  "debate": {"ok": true, "roles": [], "ledger": {"verified": [], "singleSource": [], "unsupported": [], "conflict": []}},
   "duplicate": {"score": 0.91, "exact": false, "against": {"id": 42, "title": "..."}}
 }
 ```
 
 > `post_fingerprints` aur `images` lazily bhi ban jate hain, par fresh install ke liye
-> `schema.sql` aur purane DB ke liye `migration_v4.sql` chalao.
+> `schema.sql` aur purane DB ke liye `migration_v4.sql` + `migration_v5.sql` chalao.
 
 ---
 
@@ -322,6 +408,16 @@ post_fingerprints(post_id, simhash, title_simhash, title_hash, minhash, tokens, 
 | `DUPLICATE_CHECK` | `true` | Duplicate gate on/off |
 | `DUP_MAX_SIMILARITY` | `0.82` | Block threshold |
 | `STYLE_MIN_SCORE` | `60` | Report-only threshold |
+| `REQUIRE_HUMAN_EDIT` | `true` | Insaan ke edit/note ke bina publish nahi |
+| `FACT_REGISTRY` | `true` | Verified facts D1 me save + stale warning |
+| `FACT_MAX_AGE_HOURS` | `24` | Fact re-check reminder window |
+| `VOICE_PROFILE` | `true` | Site voice comparison on/off |
+| `VOICE_PROFILE_LIMIT` | `10` | Profile ke liye approved posts |
+| `SOURCE_RECHECK` | `true` | Approve se pehle link liveness |
+| `SOURCE_RECHECK_MAX` | `3` | Kitne source links check |
+| `SOURCE_RECHECK_TIMEOUT_MS` | `3000` | Per-link timeout |
+| `ORIGINALITY_TARGET` | `0.85` | Minimum original-sentence share |
+| `SPECIFICITY_LOW` / `SPECIFICITY_HIGH` | `3` / `10` | Details per 100 words range |
 | `COPY_MAX_OVERLAP` | `0.3` | Max source copy |
 | `COPY_MAX_RUN` | `35` | Max copied words in a row |
 
@@ -348,7 +444,10 @@ ADMIN_TOKEN / basic auth
 - **Admin auth:** hardened session cookie; har admin route protected.
 - **No paid fallback:** paid API key add nahi ki gayi; free tier hi.
 - **Auto-publish OFF by design:** `SCORE_MAX=94` < `AUTO_APPROVE_MIN_SCORE=95`.
-- **Human final approval:** draft review page par claims, style, image, video sab dikhta hai.
+- **Human final approval:** draft review page par claims, quality scores, unconfirmed facts, image, video sab dikhta hai.
+- **Human edit gate:** `REQUIRE_HUMAN_EDIT=true` par body edit/note + 3-fact checkbox ke bina publish nahi; auto-publish bhi `human_edited_at` maangta hai.
+- **Conflict = no fake certainty:** do outlets ke alag numbers par claim `conflict` hota hai, writer "reports differ" likhta hai.
+- **Corrections public:** har badlav dated `Update` line + `/corrections` par visible; trust signal aur AdSense policy dono ke liye.
 
 ---
 
@@ -398,6 +497,7 @@ npx wrangler secret put YOUTUBE_API_KEY     # optional
 
 # DB (purana DB)
 npx wrangler d1 execute virall-db --remote --file=migration_v4.sql
+npx wrangler d1 execute virall-db --remote --file=migration_v5.sql
 
 # Code
 npx wrangler deploy
@@ -407,7 +507,13 @@ npm test
 npm run check
 ```
 
-**Fresh install:** `schema.sql` chalao, `migration_v4.sql` ki zaroorat nahi (tables already hain).
+**Fresh install:** sirf `schema.sql` chalao — usme `posts.human_edited_at`, `human_edit_note` aur
+`facts`/`fact_sources`/`post_facts`/`corrections` tables already hain, isliye `migration_v4.sql`/`migration_v5.sql`
+ki zaroorat nahi. Purane DB par dono migrations chalao.
+
+`migration_v5.sql` do columns (`posts.human_edited_at`, `posts.human_edit_note`) add karta hai.
+D1 dobara chalane par "duplicate column" error de sakta hai — us case me wo statement skip karo,
+baaki tables `IF NOT EXISTS` hain.
 
 ---
 
@@ -425,6 +531,13 @@ npm run check
 | Image fail | Branded SVG news-card (0 token) |
 | Video key missing | Article image ke saath publish; YouTube search link |
 | Editor fail | Draft save hota hai, `verified=false`, human review |
+| Conflict mile | Claim `conflict`; article "reports differ" ke saath, review page par dono versions |
+| Quality score low | Draft save hota hai + penalty notes; publish ke liye human edit phir bhi zaroori |
+| Source link dead (2+) | Publish block, review page par kaun sa link mara hai |
+| Source 403/timeout | `unknown` — block nahi, "manual verify" warning |
+| Human edit missing | Publish button reason deta hai; `human_approve` form focus hota hai |
+| Facts stale (24h+) | Warning + **Facts aaj verify kiye** (0 token) |
+| Correction darj | Dated `Update` line + `/corrections` entry, purana text bhi rehta hai |
 | D1 save fail | Saaf error, token laga/na laga batata hai |
 
 ---
@@ -435,14 +548,21 @@ npm run check
 - Google indexing/ranking/AdSense approval ki **guarantee nahi**.
 - Multi-AI debate quality badhata hai, par 100% truth guarantee nahi.
 - AI detectors unreliable hain; goal reader ko useful content dena hai.
+- **Human edit default me zaroori hai:** `REQUIRE_HUMAN_EDIT=true` par roz 20 auto-posts nahi nikal sakte;
+  volume insaan ki capacity ke hisaab se rakho.
+- Originality/specificity/voice heuristics hain, proof nahi — weird but genuine articles par false
+  penalty aa sakti hai, isliye ye sirf score/notes dete hain, hard block nahi (human gate hard block hai).
+- Source recheck user-agent/bot protection se `unknown` de sakta hai; dead links ka pakadna best-effort hai.
 - Token budget aur provider availability deploy ke baad monitor karo (`/admin/api-status`).
 
 ---
 
 ## 16. Test coverage
 
-- `npm test` → **288 pass, 0 fail** (73 suites, 18 files)
-- `npm run check` → **22/22 modules load**
+- `npm test` → **315 pass, 0 fail** (80 suites, 19 files)
+- `npm run check` → **29/29 modules load**
 
 New tests: `claims`, `similarity`, `style`, `debate` (ledger, duplicate, human-style, safe roles,
-provider rotation, judge fallback, timeouts, no-source/less-roles failures).
+provider rotation, judge fallback, timeouts, no-source/less-roles failures) aur `quality-layers`
+(conflicts, originality, specificity, voice, fact registry, corrections, source liveness — in-memory
+SQLite D1 adapter se, koi network nahi).

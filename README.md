@@ -31,7 +31,7 @@ Koi VPS, koi paid database, koi npm dependency nahi. Paisa **Google AdSense** se
 | SEO helpers | `src/seo-optimizer.js` |
 | Admin API dashboard | `src/admin-api-status.js` |
 | Fresh database | `schema.sql` |
-| Purane database ka upgrade | `migration_v3.sql` + `migration_v4.sql` + `deploy.sh` |
+| Purane database ka upgrade | `migration_v3.sql` + `migration_v4.sql` + `migration_v5.sql` + `deploy.sh` |
 | Poora architecture / runbook | `ARCHITECTURE.md` |
 | Tests | `test/unit/*.test.js` |
 
@@ -46,7 +46,7 @@ risky hai — isliye manual approve default hai.
 Zaroorat: **Node.js 22+** (Node 26 par test kiye gaye). `npm install` ki zaroorat nahi — koi dependency nahi hai.
 
 ```bash
-npm test          # 288 unit tests (network nahi, DB nahi)
+npm test          # 315 unit tests (network nahi, DB nahi)
 npm run check     # har src/*.js ko import karke syntax/import error pakadta hai
 npx wrangler dev  # local Worker (pehli baar Cloudflare login maangega)
 ```
@@ -92,10 +92,12 @@ npx wrangler d1 execute virall-db --remote --command "ALTER TABLE posts ADD COLU
 npx wrangler d1 execute virall-db --remote --file=migration_images_seo.sql
 npx wrangler d1 execute virall-db --remote --file=migration_v3.sql
 npx wrangler d1 execute virall-db --remote --file=migration_v4.sql
+npx wrangler d1 execute virall-db --remote --file=migration_v5.sql
 ```
 
-`migration_v3.sql` aur `migration_v4.sql` idempotent hain (sirf `IF NOT EXISTS`), unhe dobara chalana safe hai.
-Column `ALTER` dobara chalane par error dega — pehle check kar lo ki column already hai.
+`migration_v3.sql`, `migration_v4.sql` aur `migration_v5.sql` idempotent hain (tables par `IF NOT EXISTS`), unhe dobara chalana safe hai.
+`migration_v5.sql` do naye columns (`posts.human_edited_at`, `posts.human_edit_note`) add karta hai;
+dobara chalane par D1 "duplicate column" error dega — us case me wo step skip karo.
 
 ---
 
@@ -168,6 +170,16 @@ koi key nahi chahiye. Sirf `PEXELS_API_KEY` / `YOUTUBE_API_KEY` na hone se photo
 | `DUP_MAX_SIMILARITY` | `0.82` | Isse zyada similarity = duplicate. |
 | `DUP_CHECK_LIMIT` | `400` | Kitne purane posts ke fingerprints compare karne hain. |
 | `STYLE_MIN_SCORE` | `60` | Style guard report threshold (penalty score me subtract hota hai). |
+| `REQUIRE_HUMAN_EDIT` | `true` | Draft publish/auto-publish se pehle insaan ka edit ya 30+ akshar ka note zaroori. |
+| `FACT_REGISTRY` | `true` | Code-verified facts ko permanent `facts` table me save karo (stale-fact warning ke liye). |
+| `FACT_MAX_AGE_HOURS` | `24` | Itne ghante baad fact "re-check pending" dikhta hai. |
+| `VOICE_PROFILE` | `true` | Site voice profile (last 10 approved posts) se naya draft compare karo. |
+| `VOICE_PROFILE_LIMIT` | `10` | Kitne approved posts se voice profile bane. |
+| `SOURCE_RECHECK` | `true` | Approve se pehle source links live hain ya nahi check karo. |
+| `SOURCE_RECHECK_MAX` | `3` | Kitne source links check karne hain. |
+| `SOURCE_RECHECK_TIMEOUT_MS` | `3000` | Ek source check ka timeout. |
+| `ORIGINALITY_TARGET` | `0.85` | Itne se kam original sentences par score penalty. |
+| `SPECIFICITY_LOW` / `SPECIFICITY_HIGH` | `3` / `10` | 100 shabd par thos detail (naam/number/tareekh) ki natural range. |
 
 **AdSense on karne ke liye:** `ADSENSE_PUB` + `ADSENSE_SLOT` (+ optional bottom slot) bharo,
 deploy karo, phir `https://virall.in/ads.txt` check karo. Detail: `MONETIZATION.md`.
@@ -192,7 +204,7 @@ Pehli baar deploy ke baad:
 - **Topics** page se "Abhi trends + research chalao" dabao.
 - Ek topic kholo → **Card banao** (0 token) → card dekho → **Approve: article likho**.
 - Draft review page par publish se pehle ki jaanch, image/video, sources dikhte hain.
-- Sab theek ho to **Approve + publish** dabao.
+- **Human check form** bharo: article padho, zaroorat ho to `body` edit karo (ya 30+ akshar ka note likho), "maine 3 random facts sources se mila liye" tick karo, phir **Human-check ke saath approve + publish** dabao. Iske bina normal approve nahi chalega.
 
 ### Admin click ka rule (time pass nahi)
 
@@ -208,6 +220,12 @@ Pehli baar deploy ke baad:
 - **Approve: iska article likho** dabane par wahi debate (agar 2 ghante ke andar chala hai) reuse hota hai, isliye token dobara kharch nahi hote. Debate na chala ho to write click khud chala leta hai — single click me result.
 - **Duplicate gate (0 token):** agar same story pehle se site par hai (SimHash + MinHash + title hash), topic `duplicate` ho jata hai, AI token kharch nahi hota, aur admin ko purana post dikh jata hai.
 - **Style guard (0 token):** draft me `furthermore`/`in conclusion` jaise AI phrases, flat sentence rhythm ya repeated phrases hon to score me penalty lagti hai; post review page par style score + notes dikhte hain.
+- **Quality layers (0 token):** writer har draft par originality (sources se kitna alag likha), specificity (100 shabd par naam/number/tareekh) aur site-voice (last 10 approved posts ka rhythm) bhi check karta hai. Chaaron penalties milakar maximum 20 points kate hain, isliye ek layer doosre ko chhupa nahi sakti.
+- **Contradiction detector (0 token):** agar do outlets ek hi fact ke do alag number dete hain (1200 crore vs 2100 crore), claim `conflict` hota hai - na verified, na writer ko "sach" bana kar diya jata hai. Article me "reports differ" ya number chhodna padta hai.
+- **Human edit gate:** `REQUIRE_HUMAN_EDIT=true` par draft tab tak publish nahi hota jab tak admin body edit (200+ akshar ka change) ya 30+ akshar ka check-note na de aur "3 random facts" checkbox tick na kare. Auto-publish bhi `human_edited_at` ke bina nahi chalta.
+- **Source recheck (0 token):** approve se pehle 404/410/451 links pakde jate hain; 2+ dead links approve rok dete hain. 403/timeout "unknown" hote hain, article unfairly block nahi hota.
+- **Fact registry (0 token):** verified claims outlets ke saath D1 me save hote hain. 24 ghante se re-check na hue facts review page par warning dikhate hain; "Facts aaj verify kiye" se timestamp update hota hai.
+- **Corrections:** admin review page se correction darj karo - article ke neeche dated `Update (YYYY-MM-DD)` line judti hai aur `/corrections` par sab public dikhta hai.
 
 ---
 
@@ -221,8 +239,8 @@ Pehli baar deploy ke baad:
 | `/search?q=` | Site search (noindex) |
 | `/cards`, `/card/<id>` | Thumbnail-style card posts (default noindex) |
 | `/img/<id>.jpg` | D1 me stored AI image (1 year immutable cache) |
-| `/about`, `/editorial-policy`, `/contact`, `/privacy-policy`, `/terms`, `/disclaimer` | Trust pages (AdSense ke liye zaroori) |
-| `/sitemap.xml`, `/feed.xml`, `/robots.txt`, `/ads.txt` | SEO / ads |
+| `/about`, `/author`, `/editorial-policy`, `/contact`, `/corrections`, `/privacy-policy`, `/terms`, `/disclaimer` | Trust pages (AdSense ke liye zaroori) |
+| `/sitemap.xml`, `/news-sitemap.xml`, `/feed.xml`, `/robots.txt`, `/ads.txt` | SEO / ads |
 | `/{INDEXNOW_KEY}.txt` | IndexNow verification |
 | `/admin` | Login + dashboard |
 | `/admin/topics`, `/admin/topic/<id>` | Trends, research, card, write |
@@ -280,10 +298,11 @@ Safety rules jo code me already hain:
 npm test
 ```
 
-288 tests in 18 files (`preread`, `validate`, `writer`, `editor`, `playbook`, `verify`, `facts`, `cardpost`, `media`,
-`trends`, `ai`, `api-manager`, `seo-optimizer`, `index`, `claims`, `similarity`, `style`, `debate`). Sab pure functions / fake KV / fake fetch -
-koi network call nahi, koi real DB nahi. `npm run check` har module import karke toota hua
-import/syntax pakadta hai.
+315 tests in 19 files (`preread`, `validate`, `writer`, `editor`, `playbook`, `verify`, `facts`, `cardpost`, `media`,
+`trends`, `ai`, `api-manager`, `seo-optimizer`, `index`, `claims`, `similarity`, `style`, `debate`, `quality-layers`). Sab pure functions / fake KV / fake fetch -
+koi network call nahi, koi real DB nahi. `quality-layers` conflicts, originality, specificity, voice, fact
+registry, corrections aur source liveness ko cover karta hai (in-memory SQLite se, network nahi).
+`npm run check` har module import karke toota hua import/syntax pakadta hai.
 
 ---
 
@@ -295,6 +314,9 @@ import/syntax pakadta hai.
 - **Ads sirf tab dikhte hain** jab `ADSENSE_PUB` + slot ID set ho aur account approved ho.
   Abhi live site par `ads.txt` sirf `# set ADSENSE_PUB` deta hai — yani earning zero.
 - **Auto-publish by design off hai** (score cap 94 vs threshold 95). Ise force karna safe nahi.
+- **Human edit default me zaroori hai.** `REQUIRE_HUMAN_EDIT=true` par bina insaan ke edit/note koi post
+  publish nahi hoti. Isse AdSense ki "scaled content" policy se bachne me madad milti hai, par iska
+  matlab hai ki roz 20 posts automatically nahi nikal sakte — volume tumhari capacity ke hisaab se rakho.
 - **AI model names badal sakte hain.** `src/ai.js` ke `FALLBACKS` aur provider model lists
   samay-samay par verify karni padti hain; purana model 404 de to `AI_MODEL`/`*_MODELS` badlo.
 - **Hindi quality** AI par depend karti hai. Important post khud padh kar edit karo.

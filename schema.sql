@@ -35,7 +35,10 @@ CREATE TABLE IF NOT EXISTS posts (
   seo_score INTEGER DEFAULT 0,
   meta_description TEXT,
   meta_keywords TEXT,
-  schema_json TEXT
+  schema_json TEXT,
+  -- human approval (REQUIRE_HUMAN_EDIT): set when a person has edited/checked the draft
+  human_edited_at INTEGER,
+  human_edit_note TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_posts_status ON posts(status, publish_at);
 CREATE INDEX IF NOT EXISTS idx_posts_cat ON posts(category, publish_at);
@@ -84,3 +87,38 @@ CREATE TABLE IF NOT EXISTS settings (
   k TEXT PRIMARY KEY,
   v TEXT
 );
+
+-- Permanent fact record: every code-verified claim + its outlets + last verification time.
+-- factregistry.js inhe lazily bhi bana leta hai.
+CREATE TABLE IF NOT EXISTS facts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  topic_id INTEGER,
+  text TEXT NOT NULL,
+  status TEXT DEFAULT 'active',
+  first_seen INTEGER,
+  last_verified INTEGER
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_facts_topic_text ON facts(topic_id, text);
+CREATE TABLE IF NOT EXISTS fact_sources (
+  fact_id INTEGER NOT NULL,
+  source TEXT,
+  url TEXT,
+  date INTEGER,
+  PRIMARY KEY(fact_id, source)
+);
+CREATE TABLE IF NOT EXISTS post_facts (
+  post_id INTEGER NOT NULL,
+  fact_id INTEGER NOT NULL,
+  PRIMARY KEY(post_id, fact_id)
+);
+
+-- Public corrections / dated updates. corrections.js lazily bhi banati hai.
+CREATE TABLE IF NOT EXISTS corrections (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  post_id INTEGER NOT NULL,
+  old_text TEXT,
+  new_text TEXT,
+  reason TEXT,
+  created_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_corrections_post ON corrections(post_id, created_at);

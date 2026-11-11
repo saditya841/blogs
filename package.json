@@ -10,6 +10,6 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "db:schema": "wrangler d1 execute virall-db --remote --file=schema.sql",
-    "db:migrate": "wrangler d1 execute virall-db --remote --file=migration_v3.sql"
+    "db:migrate": "wrangler d1 execute virall-db --remote --file=migration_v5.sql"
   }
 }

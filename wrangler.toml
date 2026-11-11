@@ -58,5 +58,19 @@ DUP_MAX_SIMILARITY = "0.82"
 DUP_CHECK_LIMIT = "400"
 STYLE_MIN_SCORE = "60"
 
+# Human approval + fact quality (0 token). REQUIRE_HUMAN_EDIT=true means a draft is never
+# published (manual or auto) until a person edits it or writes a 30+ character check note.
+REQUIRE_HUMAN_EDIT = "true"
+FACT_REGISTRY = "true"
+FACT_MAX_AGE_HOURS = "24"
+VOICE_PROFILE = "true"
+VOICE_PROFILE_LIMIT = "10"
+SOURCE_RECHECK = "true"
+SOURCE_RECHECK_MAX = "3"
+SOURCE_RECHECK_TIMEOUT_MS = "3000"
+ORIGINALITY_TARGET = "0.85"
+SPECIFICITY_LOW = "3"
+SPECIFICITY_HIGH = "10"
+
 # API KEYS yahan NAHI hain. Ye Cloudflare Secrets me rakhi jaati hain:
 # GROQ_API_KEY, GEMINI_API_KEY, HUGGINGFACE_API_KEY, COHERE_API_KEY

@@ -32,6 +32,9 @@ done
 npx wrangler d1 execute virall-db --remote --file=migration_images_seo.sql
 npx wrangler d1 execute virall-db --remote --file=migration_v3.sql
 npx wrangler d1 execute virall-db --remote --file=migration_v4.sql
+# v5 adds posts.human_edited_at / human_edit_note. On a database where they already exist D1
+# prints "duplicate column", so a failure here is not fatal.
+npx wrangler d1 execute virall-db --remote --file=migration_v5.sql || echo "migration_v5: columns already present (ok)"
 # Fresh database? Upar ke ALTER steps ki jagah ek hi baar: --file=schema.sql
 
 # 4. Deploy
