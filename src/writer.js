@@ -32,6 +32,10 @@ import { originality } from './originality.js';
 import { specificity, specificityMeta } from './specificity.js';
 import { loadVoiceProfile, voiceCheck, voiceMeta } from './voice.js';
 import { saveFacts, linkPostFacts } from './factregistry.js';
+import {
+  BUSINESS_ROLES, businessAngle, businessGate, businessMessages, businessMeta,
+  derivedNumbers, frameworkFor, isBusinessMode
+} from './business.js';
 
 const now = () => Math.floor(Date.now() / 1000);
 export { CATS }; // single source of truth (validate.js)
@@ -178,20 +182,26 @@ function buildMessages(env, topic, sources, feedback, brief, ledgerBlock = '') {
 
 export async function writeOne(env, opts = {}) {
   // ---- 1. daily limit: IST calendar day (resets 12:00 AM IST) ----
-  const limit = Number(env.DAILY_POST_LIMIT || 4);
+  // Business mode has its own, smaller cap: 3 deep articles/day is better than 10 thin ones.
+  const bizEnv = isBusinessMode(env, null, {});
+  const limit = Number((bizEnv ? env.BUSINESS_DAILY_LIMIT : env.DAILY_POST_LIMIT) || 4);
   const made = (await env.DB.prepare('SELECT COUNT(*) c FROM posts WHERE created_at>=?').bind(dayStartIST()).first()).c;
   if (made >= limit) return { ok: false, reason: `Aaj ki limit (${limit}) poori`, spent: false };
 
   // ---- 2. pick a ready topic that passes preflight and has real source text ----
   const cands = opts.topicId
     ? (await env.DB.prepare('SELECT * FROM topics WHERE id=?').bind(opts.topicId).all()).results
-    : (await env.DB.prepare("SELECT * FROM topics WHERE status='ready' ORDER BY id LIMIT 8").all()).results;
+    : bizEnv
+      ? (await env.DB.prepare("SELECT * FROM topics WHERE status='ready' AND (traffic='business' OR research LIKE '%\"mode\":\"business\"%') ORDER BY id LIMIT 8").all()).results
+      : (await env.DB.prepare("SELECT * FROM topics WHERE status='ready' ORDER BY id LIMIT 8").all()).results;
 
   let topic = null, research = {}, sources = [], brief = null, why = '', refreshes = 0;
   for (const c of cands) {
     let r = {};
     try { r = JSON.parse(c.research || '{}'); } catch { r = {}; }
-    const pf = preflight(c, r);
+    const bizC = isBusinessMode(env, c, r);
+    const langC = opts.lang === 'hi' ? 'hi' : opts.lang === 'en' ? 'en' : (bizC ? String(env.BUSINESS_LANG || 'en') : langOf(env));
+    const pf = preflight(c, r, undefined, bizC);
     if (!pf.ok) { why = pf.reason || why; continue; }
     let srcs = (r.sources || [])
       .map((s) => ({ ...s, text: String(s.text || s.content || s.snippet || s.summary || s.description || '').replace(/\s+/g, ' ').trim() }))
@@ -203,7 +213,7 @@ export async function writeOne(env, opts = {}) {
     let b = (r.brief && r.brief.version === 1)
       ? r.brief
       : buildBrief(c.query, srcs, {
-        lang: langOf(env), nowSec: now(),
+        lang: langC, nowSec: now(),
         minSources: pf.minSources, maxAgeDays: pf.maxAgeDays, needDates: pf.needDates, label: pf.label
       });
     // A 'ready' topic researched days ago is NOT writable any more: its newest source may be stale.
@@ -233,6 +243,12 @@ export async function writeOne(env, opts = {}) {
     break;
   }
   if (!topic) return { ok: false, reason: why || 'Koi kaam ka topic nahi mila', spent: false };
+
+  const business = isBusinessMode(env, topic, research);
+  const lang = opts.lang === 'hi' ? 'hi' : opts.lang === 'en' ? 'en' : (research.lang === 'hi' ? 'hi' : research.lang === 'en' ? 'en' : (business ? String(env.BUSINESS_LANG || 'en') : langOf(env)));
+  const angle = business ? businessAngle(topic.query, research) : '';
+  const fwId = business ? frameworkFor(topic.query, research) : '';
+  const minWords = business ? Math.max(600, Number(env.BUSINESS_MIN_WORDS || 900)) : 450;
 
   // ---- 2c. duplicate check (ZERO token) ----
   // Same story / same headline pehle se site par hai? Topic ko 'duplicate' mark karo aur AI token
@@ -277,7 +293,7 @@ export async function writeOne(env, opts = {}) {
       debateMetaObj = prev;
       ledgerBlock = ledgerTextFromMeta(prev.ledger);
     } else {
-      debate = await runDebate(env, { topic, sources, brief, lang: langOf(env) });
+      debate = await runDebate(env, { topic, sources, brief, lang, roles: business ? BUSINESS_ROLES : undefined });
       debateMetaObj = debate && debate.ledger ? debateMeta(debate) : null;
       if (debateMetaObj) {
         research.debate = debateMetaObj;
@@ -298,27 +314,40 @@ export async function writeOne(env, opts = {}) {
 
   // ---- 3. AI draft (at most one rewrite retry) ----
   const attempt = async (feedback) => {
-    const ai = await runAI(env, buildMessages(env, topic, sources, feedback, brief, ledgerBlock), { max_tokens: 6000, temperature: 0.6 });
+    const messages = business
+      ? businessMessages(env, { topic, sources, brief, ledgerBlock, lang, research, feedback })
+      : buildMessages(env, topic, sources, feedback, brief, ledgerBlock);
+    const ai = await runAI(env, messages, { max_tokens: business ? 8000 : 6000, temperature: business ? 0.55 : 0.6 });
     if (!ai.text) return { ai, draft: null };
     const draft = parseDraft(ai.text);
     const cc = copyCheck(draft.body, sourceTexts);
     const words = countWords(draft.body);
-    const ungrounded = ungroundedNumbers(`${draft.title} ${draft.summary} ${draft.body}`, sourceTexts, [thisYear]);
+    const calcAllow = business ? derivedNumbers(draft.body, sourceTexts.join('\n')) : [];
+    const ungrounded = ungroundedNumbers(`${draft.title} ${draft.summary} ${draft.body}`, sourceTexts, [thisYear, ...calcAllow]);
     return { ai, draft, m: { ...cc, words, ungrounded } };
   };
-  const usable = (a) => a.draft && a.draft.title && a.m.words >= 150;
+  const usable = (a) => a.draft && a.draft.title && a.m.words >= (business ? Math.round(minWords * 0.6) : 150);
+  const gateOf = (a) => (business && a && a.draft && a.draft.body) ? businessGate(a.draft, { minWords }) : null;
+  const gateFeedback = (g) => {
+    if (!g) return '';
+    const items = [...(g.errors || []), ...(g.warnings || [])].map((x) => x.msg).slice(0, 8);
+    return items.length ? `Business quality gate: ${items.join(' | ')}` : '';
+  };
 
   let best = await attempt('');
   if (!best.ai.text) {
     return { ok: false, reason: `AI draft nahi bana: ${(best.ai.errors || []).join(' | ').slice(0, 300) || 'koi jawab nahi'}`, spent: true };
   }
-  const needsRetry = (a) => !usable(a) || a.m.overlap > RETRY_OVERLAP || a.m.longest >= RETRY_RUN;
+  const needsRetry = (a) => !usable(a) || a.m.overlap > RETRY_OVERLAP || a.m.longest >= RETRY_RUN || (business && gateOf(a) && !gateOf(a).ok);
   if (needsRetry(best)) {
+    const g = gateOf(best);
     const why = !usable(best)
-      ? 'Pichhla jawab adhura tha. Poora format follow karo: TITLE, SUMMARY, CATEGORY, TAGS, BODY (450+ shabd).'
-      : `Pichhla draft sources se ${Math.round(best.m.overlap * 100)}% milta tha (sabse lambi copied line ${best.m.longest} shabd). Poora naye shabdon aur alag vakya-rachna me dobara likho, sirf tathya wahi rakho.`;
+      ? `Pichhla jawab adhura tha. Poora format follow karo: TITLE, SUMMARY, CATEGORY, TAGS, BODY (${minWords}+ shabd).`
+      : business
+        ? `Pichhla draft business quality gate pass nahi hua. ${gateFeedback(g)}. Poora naye shabdon me dobara likho, sirf tathya wahi rakho, aur saare required sections add karo.`
+        : `Pichhla draft sources se ${Math.round(best.m.overlap * 100)}% milta tha (sabse lambi copied line ${best.m.longest} shabd). Poora naye shabdon aur alag vakya-rachna me dobara likho, sirf tathya wahi rakho.`;
     const second = await attempt(why);
-    if (second.ai.text && usable(second) && (!usable(best) || second.m.overlap < best.m.overlap)) best = second;
+    if (second.ai.text && usable(second) && (!usable(best) || second.m.overlap < best.m.overlap || (business && (gateOf(second)?.score || 0) > (gateOf(best)?.score || 0)))) best = second;
   }
   if (!usable(best)) {
     return { ok: false, reason: 'AI ka draft adhura aaya (title ya 150+ shabd nahi). Dobara try karo.', spent: true };
@@ -330,7 +359,7 @@ export async function writeOne(env, opts = {}) {
   const { ai, draft, m } = best;
 
   // ---- 4. clean up fields ----
-  const category = CATS.find((c) => c.toLowerCase() === draft.category.toLowerCase());
+  const category = business ? 'Business' : CATS.find((c) => c.toLowerCase() === String(draft.category || '').toLowerCase());
   draft.category = category || 'India';
   draft.tags = draft.tags.split(/[,،]/).map((t) => t.trim()).filter(Boolean).slice(0, 8).join(', ') || String(topic.query || '');
   if (!draft.summary) draft.summary = draft.body.replace(/##[^\n]*/g, '').trim().split(/(?<=[.!?।])\s/)[0].slice(0, 155);
@@ -351,7 +380,8 @@ export async function writeOne(env, opts = {}) {
     };
   } else {
     fc = await factCheck(env, draft, sources, {
-      lang: langOf(env),
+      lang,
+      business,
       maxRounds: Number(env.EDITOR_MAX_ROUNDS ?? 2),
       newestSource,
       overlap: m.overlap
@@ -364,11 +394,12 @@ export async function writeOne(env, opts = {}) {
     return reject(env, topic, research, `Editor ke baad copy overlap ${Math.round(finalCc.overlap * 100)}% zyada; ${finalCc.longest} shabd ki line sources se mil rahi`);
   }
   const words = countWords(draft.body);
-  const finalUngrounded = ungroundedNumbers(`${draft.title} ${draft.summary} ${draft.body}`, sourceTexts, [thisYear]);
+  const calcAllowed = business ? derivedNumbers(draft.body, sourceTexts.join('\n')) : [];
+  const finalUngrounded = ungroundedNumbers(`${draft.title} ${draft.summary} ${draft.body}`, sourceTexts, [...new Set([thisYear, ...calcAllowed])]);
   const headings = (draft.body.match(/^## /gm) || []).length;
   const hasAnalysis = hasAnalysisSection(draft.body);
   // ZERO-token style guard: stock AI phrases, flat sentence rhythm, repeated openings/phrases.
-  const style = styleCheck(draft.body, { lang: langOf(env), minScore: Number(env.STYLE_MIN_SCORE || 0) });
+  const style = styleCheck(draft.body, { lang, minScore: Number(env.STYLE_MIN_SCORE || 0) });
   // ZERO-token quality layers (no extra AI token):
   //  * originality — sentences that are still close to the sources even after the copy check,
   //  * specificity — concrete names/numbers/dates vs vague filler,
@@ -386,8 +417,12 @@ export async function writeOne(env, opts = {}) {
     ? null
     : await loadVoiceProfile(env, Number(env.VOICE_PROFILE_LIMIT || 10));
   const voice = voiceCheck(draft.body, voiceProfile);
+  // Business depth gate: framework, counterpoint, playbook, risks, honesty, numbers.
+  // It never decides "true"; it decides whether this reads like a real business article or filler.
+  const businessResult = business ? businessGate(draft, { minWords }) : null;
+  const businessPenalty = businessResult ? Math.max(0, Math.min(15, Math.round((100 - businessResult.score) / 5))) : 0;
   const qualityPenalty = Math.max(0, Math.min(20,
-    (Number(style.penalty) || 0) + (Number(orig.penalty) || 0) + (Number(spec.penalty) || 0) + (Number(voice.penalty) || 0)
+    (Number(style.penalty) || 0) + (Number(orig.penalty) || 0) + (Number(spec.penalty) || 0) + (Number(voice.penalty) || 0) + businessPenalty
   ));
 
   const scored = scoreDraft({
@@ -406,6 +441,15 @@ export async function writeOne(env, opts = {}) {
     qualityPenalty
   });
   const notes = scored.notes;
+  if (businessResult) {
+    for (const w of (businessResult.errors || []).slice(0, 3)) notes.push(`Business gate: ${w.msg}`);
+    if (!businessResult.ok) {
+      scored.score = Math.max(0, scored.score - 8);
+      notes.push(`Business depth gate fail: score ${businessResult.score}/100`);
+    } else {
+      notes.push(`Business depth gate pass: ${businessResult.score}/100`);
+    }
+  }
   // Auto-publish is still capped at 94 by default, even when the fact-check passes. A human should approve the
   // first months of content; raise SCORE_MAX only after you trust the pipeline and have real traffic.
   const score = Math.min(scored.score, Number(env.SCORE_MAX || 94));
@@ -414,7 +458,7 @@ export async function writeOne(env, opts = {}) {
   const prereadMeta = brief ? {
     ok: !!brief.ok,
     quality: brief.quality || 0,
-    lang: brief.lang || langOf(env),
+    lang: brief.lang || lang,
     mixed: !!brief.mixed,
     usable: (brief.stats && brief.stats.usable) || 0,
     fullText: (brief.stats && brief.stats.fullText) || 0,
@@ -484,6 +528,10 @@ export async function writeOne(env, opts = {}) {
   }
   for (const n of (fc.numbersNotInSources || []).slice(0, 4)) unconfirmed.push({ kind: 'number', text: `Aankda sources me confirm nahi hua: ${n}`, detail: '' });
   for (const n of (fc.latinNotInSources || []).slice(0, 4)) unconfirmed.push({ kind: 'name', text: `Naam sources me confirm nahi hua: ${n}`, detail: '' });
+  if (businessResult) {
+    for (const w of (businessResult.warnings || []).slice(0, 4)) unconfirmed.push({ kind: 'business', text: w.msg, detail: '' });
+    for (const e of (businessResult.errors || []).slice(0, 3)) unconfirmed.push({ kind: 'business', text: e.msg, detail: 'Publish se pehle theek karo' });
+  }
   const unconfirmedFinal = unconfirmed.slice(0, 12);
 
   // ---- 7. save draft + mark topic, in ONE atomic batch ----
@@ -494,7 +542,7 @@ export async function writeOne(env, opts = {}) {
     body: draft.body,
     category: draft.category,
     tags: draft.tags,
-    lang: langOf(env),
+    lang,
     image_url: featured,
     image_credit: (img && img.credit) || '',
     sources: JSON.stringify(sources.map(({ text, content, snippet, summary, description, ...rest }) => rest)),
@@ -504,7 +552,8 @@ export async function writeOne(env, opts = {}) {
       ...fcMeta,
       overlap: finalCc.overlap,
       newest_source: newestSource,
-      lang: langOf(env),
+      lang,
+      business: businessMeta(businessResult),
       preread: prereadMeta,
       style: styleMeta(style),
       originality: { score: orig.score, copied: orig.copied, total: orig.total, penalty: orig.penalty, notes: (orig.notes || []).slice(0, 4) },
@@ -515,7 +564,8 @@ export async function writeOne(env, opts = {}) {
         style: Number(style.penalty) || 0,
         originality: Number(orig.penalty) || 0,
         specificity: Number(spec.penalty) || 0,
-        voice: Number(voice.penalty) || 0
+        voice: Number(voice.penalty) || 0,
+        business: businessPenalty
       },
       unconfirmed: unconfirmedFinal,
       duplicate: duplicateInfo,
@@ -559,7 +609,7 @@ export async function writeOne(env, opts = {}) {
     }
   }
 
-  console.log(JSON.stringify({ writeOne: 'ok', postId, provider: ai.provider, model: ai.model, score, words, overlap: Math.round(finalCc.overlap * 100), verified: !!fc.verified, claims: fc.claims || 0 }));
+  console.log(JSON.stringify({ writeOne: 'ok', postId, provider: ai.provider, model: ai.model, score, words, overlap: Math.round(finalCc.overlap * 100), verified: !!fc.verified, claims: fc.claims || 0, business: business ? { ok: businessResult?.ok, score: businessResult?.score, angle, framework: fwId } : undefined }));
 
   return {
     ok: true,
@@ -585,6 +635,10 @@ export async function writeOne(env, opts = {}) {
     specificityScore: spec.score,
     voiceScore: voice.score,
     unconfirmed: unconfirmedFinal.length,
+    business: business ? { ok: !!businessResult?.ok, score: businessResult?.score || 0, angle, framework: fwId, errors: (businessResult?.errors || []).map((e) => e.msg) } : null,
+    businessScore: businessResult ? businessResult.score : null,
+    businessOk: businessResult ? !!businessResult.ok : null,
+    lang,
     duplicateChecked: duplicateInfo.checked,
     debateVerified: (debateMetaObj && debateMetaObj.stats && debateMetaObj.stats.verified) || 0,
     warnings: notes

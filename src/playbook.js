@@ -5,6 +5,20 @@ import { numbersNotIn, latinNotIn } from './verify.js';
 const DAY = 86400;
 const now = () => Math.floor(Date.now() / 1000);
 
+// Business analysis is evergreen: sources may be older, and two good sources are enough.
+// A hard "stock tip / buy-sell" query is still blocked, because that is advice, not analysis.
+export const YMYL_STRICT = /\b(stock tips?|share tips?|buy or sell|target price|multibagger|crypto tips?|home remedies?|symptoms?|medicine|dosage|diagnos\w*|lakshan|ilaaj|ilaj|dawa|dawai|bimari|beemari)\b|निवेश सलाह|शेयर टिप|दवा|इलाज|बीमारी के लक्षण/i;
+
+export const BUSINESS_TYPE = {
+  type: 'business', label: 'Business analysis', allow: true, minSources: 2, maxAgeDays: 3650, needDates: false,
+  rules: [
+    'Sirf sources ke numbers/naam likho; estimate ko "estimate" likho aur formula dikhao',
+    'Stock tip, buy/sell, target price ya guaranteed return mat likho',
+    'Counterpoint, risk aur "kya confirm nahi hai" section zaroori hai',
+    'Framework apply karo, generic advice nahi'
+  ]
+};
+
 // order matters: first match wins. maxAgeDays = newest source must be this fresh. needDates = no source date -> skip.
 export const TYPES = [
   { type: 'ymyl', label: 'Paisa / sehat ki salah', allow: false,
@@ -27,8 +41,9 @@ export const TYPES = [
 const NAME_ONLY = { type: 'name_only', label: 'Sirf naam', allow: true, minSources: 4, maxAgeDays: 2, needDates: true,
   rules: ['Sirf wahi taaza ghatna likho jo notes ka sabse naya hissa hai', 'Career, purani uplabdhiyan ya biography mat likho'] };
 
-export function classify(query) {
+export function classify(query, businessMode = false) {
   const q = String(query || '').trim();
+  if (businessMode && !YMYL_STRICT.test(q)) return BUSINESS_TYPE;
   for (const t of TYPES) if (t.re && t.re.test(q)) return t;
   const w = q.split(/\s+/).filter(Boolean);
   if (w.length >= 1 && w.length <= 2 && !/\d/.test(q)) return NAME_ONLY;
@@ -39,8 +54,8 @@ const words = (s) => String(s || '').toLowerCase().split(/[^\p{L}\p{M}\p{N}]+/u)
 
 // BEFORE any AI call. topic = topics row, rs = parsed research JSON. Returns { ok, retry, type, label, rules, reason }
 // retry:true = baad mein (naye/taaza sources aane par) dobara ho sakta hai -> topic 'thin' banta hai, reject nahi. retry nahi = hamesha ke liye.
-export function preflight(topic, rs, nowSec = now()) {
-  const p = classify(topic.query);
+export function preflight(topic, rs, nowSec = now(), businessMode = false) {
+  const p = classify(topic.query, businessMode);
   const base = {
     type: p.type, label: p.label, rules: p.rules || [],
     minSources: p.minSources || 3, maxAgeDays: p.maxAgeDays || 7, needDates: !!p.needDates
@@ -53,12 +68,19 @@ export function preflight(topic, rs, nowSec = now()) {
   }
   const src = (rs && rs.sources) || [];
   if (src.length < p.minSources) return { ok: false, retry: true, ...base, reason: `${p.label}: sirf ${src.length} source hain, ${p.minSources} chahiye` };
+  // Wikipedia is background only. A business article needs at least one real news/report source,
+  // otherwise the whole piece would be built on an encyclopedia summary.
+  if (p.type === 'business') {
+    const nonWiki = src.filter((s) => !/wikipedia\.org/i.test(String(s.url || '')));
+    if (!nonWiki.length) return { ok: false, retry: true, ...base, reason: 'Business: sirf Wikipedia mila, kam se kam ek news/report source chahiye' };
+  }
   // the topic's own words must really appear in at least 2 sources (stops "unrelated sources" drafts)
   const qw = words(topic.query);
   if (qw.length) {
     const texts = src.map((s) => `${s.title || ''} ${s.snippet || ''} ${s.text || ''}`.toLowerCase());
     const found = qw.filter((w) => texts.filter((t) => t.includes(w)).length >= 2).length;
-    if (found / qw.length < 0.6) return { ok: false, retry: true, ...base, reason: 'Topic ke shabd 2 sources mein bhi nahi milte, sources alag cheez ki baat kar rahe hain' };
+    const need = p.type === 'business' ? 0.4 : 0.6;
+    if (found / qw.length < need) return { ok: false, retry: true, ...base, reason: 'Topic ke shabd 2 sources mein bhi nahi milte, sources alag cheez ki baat kar rahe hain' };
   }
   const dates = src.map((s) => s.date || 0).filter(Boolean);
   const newest = dates.length ? Math.max(...dates) : 0;

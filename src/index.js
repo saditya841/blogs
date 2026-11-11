@@ -1,7 +1,8 @@
 // Virall - Cloudflare-only blog. Step 1: SEO site + D1 + admin. Step 2: Trends -> topics -> research.
-import { collectTopics, researchPending, researchTopic } from './trends.js';
+import { collectTopics, collectBusinessTopics, researchPending, researchTopic } from './trends.js';
+import { isBusinessMode } from './business.js';
 import { runAI } from './ai.js';
-import { writeOne } from './writer.js';
+import { writeOne, dayStartIST } from './writer.js';
 import { cardOne } from './card.js';
 import { writeCardPost, renderCardPage, renderCardsList } from './cardpost.js';
 import { addMedia, makeHook } from './media.js';
@@ -12,6 +13,7 @@ import { runDebate, debateMeta } from './debate.js';
 import { addCorrection, correctionsForPost, recentCorrections, correctionLine } from './corrections.js';
 import { staleFacts, markPostFactsVerified } from './factregistry.js';
 import { recheckSources } from './sourcecheck.js';
+import { autoDraftQueue, autoDraftKeep } from './autodraft.js';
 
 const now = () => Math.floor(Date.now() / 1000);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -140,8 +142,8 @@ const card = (r) => `<div class="card">${r.image_url ? `<a href="${postHref(r.sl
 function staticPage(env, key) {
   const n = esc(env.SITE_NAME), s = esc(env.SITE_URL), mail = esc(env.CONTACT_EMAIL);
   const P = {
-    'about': ['About Us', `<p>${n} is an independent news-and-explainer website. We watch what India is searching for, collect facts from multiple published sources, and write our own short, clear explainers so readers get the full picture in one place.</p><p>Every article lists the sources it was based on, and carries a publish date so you know how fresh it is.</p><p>Written by: <b>${esc(env.AUTHOR_NAME)}</b> (editorial desk). Questions or corrections: <a href="mailto:${mail}">${mail}</a>.</p>`],
-    'editorial-policy': ['Editorial Policy', `<h2>How articles are made</h2><p>Topics come from public trend data. For each topic we collect reporting from at least three independent outlets, then draft an original article in our own words. Drafts are produced with the help of AI tools, checked claim-by-claim against the collected sources, tested for similarity to those sources, and then approved by a person or by our automated quality gate before they go live.</p><h2>What we do not do</h2><p>We do not copy text from other websites, publish unverified rumours as facts, or invent quotes. If sources disagree, we say so.</p><h2>Images and video</h2><p>Images come from openly licensed libraries and are credited under the picture. Videos are embedded from the original publisher.</p><h2>Corrections</h2><p>If you find an error, email <a href="mailto:${mail}">${mail}</a> with the page link. Confirmed errors are corrected quickly and the page is updated.</p>`],
+    'about': ['About Us', `<p>${n} is an independent business-analysis website. We pick companies, industries and business models that matter in India, collect facts from multiple published sources, and explain how the money actually works — unit economics, cash flow, moats, risks and what is still unconfirmed.</p><p>Every article lists the sources it was based on, and carries a publish date so you know how fresh it is. Our business writing is analysis, not investment advice: no stock tips, target prices or guaranteed returns.</p><p>Written by: <b>${esc(env.AUTHOR_NAME)}</b> (editorial desk). Questions or corrections: <a href="mailto:${mail}">${mail}</a>.</p>`],
+    'editorial-policy': ['Editorial Policy', `<h2>How articles are made</h2><p>Topics come from public trend data and a curated business topic list. For each topic we collect reporting from independent public sources (news outlets; for business explainers we may also use Wikipedia for background only). Then we draft an original article in our own words. Drafts are produced with the help of AI tools, checked claim-by-claim against the collected sources, tested for similarity to those sources, and then approved by a person or by our automated quality gate before they go live.</p><h2>Business content</h2><p>Business articles explain models, unit economics and industry structure. They are analysis, not investment advice. We do not publish stock tips, buy or sell recommendations, target prices or guaranteed returns. Where data is missing or unconfirmed, the article says so.</p><h2>What we do not do</h2><p>We do not copy text from other websites, publish unverified rumours as facts, or invent quotes. If sources disagree, we say so.</p><h2>Images and video</h2><p>Images come from openly licensed libraries and are credited under the picture. Videos are embedded from the original publisher.</p><h2>Corrections</h2><p>If you find an error, email <a href="mailto:${mail}">${mail}</a> with the page link. Confirmed errors are corrected quickly and the page is updated.</p>`],
     'contact': ['Contact Us', `<p>For corrections, copyright concerns, advertising or any feedback, email us at <a href="mailto:${mail}">${mail}</a>. We usually reply within 2-3 working days.</p>`],
     'author': ['Author & Editorial Desk', `<p><b>${esc(env.AUTHOR_NAME || 'Virall Editorial Desk')}</b> is the byline used by the ${n} editorial desk. A real person on the desk reads every draft before it goes live, checks three random facts against the linked sources, edits the article where needed, and only then approves it.</p><h2>How we work</h2><p>We use AI tools for the first draft and for cross-checking, but code - not AI - decides whether a claim is supported by the sources. Drafts that fail the check stay unpublished. If you want to know exactly what was checked, every article links its sources and shows a "Kya confirm nahi hai" box for details we could not establish.</p><h2>Corrections</h2><p>Errors are corrected with a dated update note. See all recent corrections on the <a href="/corrections">corrections page</a>, or email <a href="mailto:${mail}">${mail}</a>.</p><h2>Contact</h2><p>Editorial desk: <a href="mailto:${mail}">${mail}</a></p>`],
     'privacy-policy': ['Privacy Policy', `<p>Last updated: ${esc(env.POLICY_UPDATED || '2026-11-08')}. This policy explains what information ${n} (${s}) handles when you visit.</p><h2>Information we collect</h2><p>We do not ask visitors to create accounts. Our servers and hosting provider (Cloudflare) may log technical data such as IP address, browser type and pages visited, for security and performance.</p><h2>Cookies and advertising</h2><p>We may show ads served by Google AdSense. Google and its partners use cookies to serve ads based on your visits to this and other sites. You can opt out of personalised advertising at <a href="https://www.google.com/settings/ads">google.com/settings/ads</a>, and learn how Google uses data at <a href="https://policies.google.com/technologies/partner-sites">policies.google.com/technologies/partner-sites</a>. Where required by law (for example in the EEA and UK), consent is requested before personalised ads are shown.</p><h2>Third-party content</h2><p>Some pages embed YouTube videos (privacy-enhanced mode). Those services may set their own cookies when you play a video. Links to other sites are not under our control.</p><h2>Children</h2><p>This site is not directed at children under 13.</p><h2>Contact</h2><p><a href="mailto:${mail}">${mail}</a></p>`],
@@ -290,12 +292,34 @@ export default {
   async scheduled(event, env, ctx) {
     ctx.waitUntil((async () => {
       await autoApprove(env); await pingIndexNow(env);
-      try { await collectTopics(env); } catch (e) { console.log('trends', e.message); }
+      try {
+        if (isBusinessMode(env)) await collectBusinessTopics(env);
+        else await collectTopics(env);
+      } catch (e) { console.log('trends', e.message); }
       try { await researchPending(env, 2); } catch (e) { console.log('research', e.message); }
       try {
         if ((await getSetting(env, 'auto_write')) === '1') {
-          const r = await writeOne(env);
-          await setSetting(env, 'last_write', JSON.stringify({ at: now(), ok: !!r.ok, msg: String(r.ok ? r.title : r.reason).slice(0, 300) }));
+          // "AI drafts, human approves" mode. Hourly cron is already a trigger, but a draft is
+          // only created while the approval queue has room and the draft clears the quality bar.
+          const pending = (await env.DB.prepare("SELECT COUNT(*) c FROM posts WHERE status='draft'").first()).c;
+          const q = autoDraftQueue(pending, env);
+          if (!q.allowed) {
+            await setSetting(env, 'last_write', JSON.stringify({ at: now(), ok: false, msg: q.reason }));
+          } else {
+            const r = await writeOne(env);
+            const keep = autoDraftKeep(r, env);
+            if (r.ok && r.postId && !keep.keep) {
+              try {
+                await env.DB.prepare("UPDATE posts SET status='rejected',updated_at=? WHERE id=?").bind(now(), r.postId).run();
+              } catch { /* rejection is best-effort; the post is still a draft */ }
+            }
+            const msg = r.ok
+              ? keep.keep
+                ? `draft bana: ${r.title} (score ${r.score}${r.business ? `, depth ${r.businessScore ?? '-'}/100` : ''}) — approve karo`
+                : `auto-reject (queue saaf rakhne ke liye): ${keep.reason}`
+              : `nahi bana: ${keep.reason}`;
+            await setSetting(env, 'last_write', JSON.stringify({ at: now(), ok: !!(r.ok && keep.keep), msg: String(msg).slice(0, 300) }));
+          }
         }
       } catch (e) {
         console.log('write', e.message);
@@ -382,7 +406,7 @@ export default {
       if (!total) return L({ title: 'Not found', noindex: true }, '<h1>404</h1><p>Yeh category nahi mili.</p>', 404);
       const { results } = await env.DB.prepare(`SELECT slug,title,summary,image_url,category,publish_at FROM posts WHERE ${LIVE} AND category=? ORDER BY publish_at DESC LIMIT ? OFFSET ?`).bind(t, c, PER_PAGE, (pg - 1) * PER_PAGE).all();
       const base = `${site}/category/${encodeURIComponent(c)}`, pages = Math.ceil(total / PER_PAGE);
-      return L({ title: `${c} News`, desc: `${c} par taaza khabrein aur explainers - ${name}`, canonical: pg > 1 ? `${base}?page=${pg}` : base, prev: pg > 1 ? `${base}?page=${pg - 1}` : '', next: pg < pages ? `${base}?page=${pg + 1}` : '' },
+      return L({ title: `${c} — analysis`, desc: `${c} par business analysis, numbers aur explainers - ${name}`, canonical: pg > 1 ? `${base}?page=${pg}` : base, prev: pg > 1 ? `${base}?page=${pg - 1}` : '', next: pg < pages ? `${base}?page=${pg + 1}` : '' },
         `<div class="crumb"><a href="/">Home</a> &rsaquo; ${esc(c)}</div><h1>${esc(c)}</h1><div class="grid">${results.map(card).join('')}</div>${pages > 1 ? `<div class="pg">${pg > 1 ? `<a href="?page=${pg - 1}">&laquo; Newer</a>` : '<span></span>'}${pg < pages ? `<a href="?page=${pg + 1}">Older &raquo;</a>` : ''}</div>` : ''}`);
     }
 
@@ -424,6 +448,11 @@ export default {
       const corrBox = corr.length
         ? `<div class="note" style="margin:18px 0"><b>Corrections / Updates</b><ul>${corr.slice(0, 8).map((c) => `<li><b>${day(c.created_at)}:</b> ${esc(c.reason || 'Update')}${c.new_text ? `<br><span class="m">${esc(c.new_text)}</span>` : ''}</li>`).join('')}</ul></div>`
         : '';
+      // Business articles are analysis, not investment advice. This box is always visible,
+      // because AdSense/YMYL reviewers look for exactly this distinction.
+      const bizBox = r.category === 'Business'
+        ? `<div class="note" style="margin:18px 0"><b>Business analysis, not investment advice</b><p class="m" style="margin:4px 0 0">Ye lekh business model, unit economics aur industry structure samajhne ke liye hai. Isme koi stock tip, buy/sell salah, target price ya guaranteed return nahi hai. Numbers sources se liye gaye hain; jahan data nahi mila wahan "confirm nahi" likha gaya hai. Koi bhi business decision lene se pehle apni research aur qualified professional se salah lein. <a href="/disclaimer">Disclaimer</a></p></div>`
+        : '';
       const ld = jsonld({ '@context': 'https://schema.org', '@type': 'NewsArticle', headline: r.title.slice(0, 110), description: r.summary, image: okImg(r.image_url) ? [r.image_url] : undefined, datePublished: new Date(r.publish_at * 1000).toISOString(), dateModified: new Date((r.updated_at || r.publish_at) * 1000).toISOString(), inLanguage: r.lang || 'hi', mainEntityOfPage: canon, wordCount: wc, keywords: tags.join(', ') || undefined, articleSection: r.category || undefined, author: { '@type': 'Organization', name: env.AUTHOR_NAME, url: `${site}/about` }, publisher: { '@type': 'Organization', name, url: site } })
         + jsonld({ '@context': 'https://schema.org', '@type': 'BreadcrumbList', itemListElement: [{ '@type': 'ListItem', position: 1, name: 'Home', item: site + '/' }, ...(r.category ? [{ '@type': 'ListItem', position: 2, name: r.category, item: `${site}/category/${encodeURIComponent(r.category)}` }] : []), { '@type': 'ListItem', position: r.category ? 3 : 2, name: r.title }] });
       const enc = encodeURIComponent, shareT = enc(r.title), shareU = enc(canon);
@@ -431,6 +460,7 @@ export default {
 <article><h1>${esc(r.title)}</h1><div class="m">By <a href="/author">${esc(env.AUTHOR_NAME)}</a> &middot; Published ${day(r.publish_at)}${r.updated_at && r.updated_at - r.publish_at > 86400 ? ` &middot; Updated ${day(r.updated_at)}` : ''} &middot; ${Math.max(1, Math.round(wc / 200))} min read</div>
 ${r.image_url ? `<p>${aiImg(r.image_url) ? thumb(r, true) : `<img class="hero" width="1200" height="675" fetchpriority="high" src="${esc(r.image_url)}" alt="${esc(r.title)}">`}<span class="m credit">Image: ${aiImg(r.image_url) ? 'AI-generated illustration' : esc(r.image_credit || 'source')}</span></p>` : `<p>${cover(r, true)}</p>`}
 <p><i>${esc(r.summary)}</i></p>
+${bizBox}
 ${h2s.length >= 3 ? `<nav class="toc" aria-label="Contents"><b>Contents</b><ol>${h2s.map((h) => `<li><a href="#${h.id}">${esc(h.t)}</a></li>`).join('')}</ol></nav>` : ''}
 ${bodyHtml}
 ${unconfirmedBox}
@@ -580,12 +610,62 @@ async function admin(req, env, p, url) {
   const wm = p.match(/^\/admin\/topic\/(\d+)\/write$/);
   if (wm && req.method === 'POST') {
     const wid = Number(wm[1]);
+    let wlang = '';
+    try { const f = await req.formData(); wlang = String(f.get('lang') || ''); } catch { /* no form body */ }
     try {
-      const r = await writeOne(env, { topicId: wid });
-      if (r.ok && r.postId) return go('/admin/post/' + r.postId + '?msg=' + encodeURIComponent(`Draft ban gaya: ${r.title} (score ${r.score}, ${r.words} shabd). Neeche padh kar Approve karo.`));
+      const r = await writeOne(env, { topicId: wid, ...(wlang === 'hi' || wlang === 'en' ? { lang: wlang } : {}) });
+      if (r.ok && r.postId) return go('/admin/post/' + r.postId + '?msg=' + encodeURIComponent(`Draft ban gaya: ${r.title} (score ${r.score}, ${r.words} shabd${r.business ? `, business gate ${r.businessScore}/100` : ''}). Neeche padh kar Approve karo.`));
       const tok = r.spent === false ? ' | Token kharch nahi hua' : r.spent ? ' | Token laga' : '';
       return go('/admin/topic/' + wid + '?msg=' + encodeURIComponent('Draft nahi bana: ' + (r.reason || 'unknown') + tok));
     } catch (e) { return go('/admin/topic/' + wid + '?msg=' + encodeURIComponent('ERROR: ' + String(e.message).slice(0, 250))); }
+  }
+
+  // ---- Business mode (additive, 0 extra infra): fresh business topics + deep EN/HI drafts ----
+  if (p === '/admin/business/collect' && req.method === 'POST') {
+    try {
+      const r = await collectBusinessTopics(env);
+      const msg = `Naye business topics: ${r.added}${r.room === 0 ? ' (aaj ki topic limit poori)' : ''}${r.errs && r.errs.length ? ' | ' + r.errs.join('; ') : ''}`;
+      return go('/admin/business?msg=' + encodeURIComponent(msg));
+    } catch (e) { return go('/admin/business?msg=' + encodeURIComponent('ERROR: ' + String(e.message).slice(0, 250))); }
+  }
+  if (p === '/admin/business/write' && req.method === 'POST') {
+    const f = await req.formData();
+    const lang = String(f.get('lang') || 'en') === 'hi' ? 'hi' : 'en';
+    const tid = f.get('topicId') ? Number(f.get('topicId')) : undefined;
+    try {
+      const r = await writeOne(env, { lang, ...(tid ? { topicId: tid } : {}) });
+      if (r.ok && r.postId) return go('/admin/post/' + r.postId + '?msg=' + encodeURIComponent(`Business draft (${r.lang || lang}) ban gaya: ${r.title} (score ${r.score}, ${r.words} shabd, depth ${r.businessScore ?? '-'} /100). Neeche padh kar Approve karo.`));
+      const tok = r.spent === false ? ' | Token kharch nahi hua' : r.spent ? ' | Token laga' : '';
+      return go('/admin/business?msg=' + encodeURIComponent('Draft nahi bana: ' + (r.reason || 'unknown') + tok));
+    } catch (e) { return go('/admin/business?msg=' + encodeURIComponent('ERROR: ' + String(e.message).slice(0, 250))); }
+  }
+  if (p === '/admin/business') {
+    const msg = url.searchParams.get('msg');
+    const { results } = await env.DB.prepare("SELECT id,query,status,source_count,research FROM topics WHERE traffic='business' OR research LIKE '%\"mode\":\"business\"%' ORDER BY id DESC LIMIT 40").all();
+    const cnt = {};
+    for (const r of results) cnt[r.status] = (cnt[r.status] || 0) + 1;
+    const cap = Number((isBusinessMode(env) ? env.BUSINESS_DAILY_LIMIT : env.DAILY_POST_LIMIT) || 3);
+    const made = (await env.DB.prepare('SELECT COUNT(*) c FROM posts WHERE created_at>=?').bind(dayStartIST()).first()).c;
+    const lang = String(env.BUSINESS_LANG || 'en').toLowerCase() === 'hi' ? 'hi' : 'en';
+    const rows = results.map((r) => {
+      let d = {}; try { d = JSON.parse(r.research || '{}'); } catch {}
+      const meta = [d.framework ? `framework: ${d.framework}` : '', d.angle ? `angle: ${d.angle}` : '', `sources: ${r.source_count || 0}`].filter(Boolean).join(' · ');
+      const write = r.status === 'ready'
+        ? `<form method="post" action="/admin/business/write" style="display:inline"><input type="hidden" name="topicId" value="${r.id}"><input type="hidden" name="lang" value="en"><button class="g">Write English</button></form>
+           <form method="post" action="/admin/business/write" style="display:inline"><input type="hidden" name="topicId" value="${r.id}"><input type="hidden" name="lang" value="hi"><button class="g">Write Hindi</button></form>`
+        : `<span class="m">Pehle research karo (Topics page)</span>`;
+      return `<div class="card"><div class="p"><a href="/admin/topic/${r.id}"><b>${esc(r.query)}</b></a><div class="m"><span class="tag">${esc(r.status)}</span> ${esc(meta)}</div><div style="margin-top:6px">${write}</div></div></div>`;
+    }).join('');
+    const counts = Object.entries(cnt).map(([k, v]) => `${esc(k)}: ${v}`).join(' &middot; ') || 'koi business topic nahi';
+    return A('Business', `<h1>Business content</h1>
+${msg ? `<p class="note">${esc(msg)}</p>` : ''}
+<p class="m">Aaj ke drafts: ${made}/${cap} &middot; default language: ${lang} &middot; ${counts}</p>
+<p class="note">Business mode news se alag hai: research Wikipedia + news se hota hai, article me framework, unit economics, counterpoint, operator playbook aur "kya confirm nahi hai" section code se check hote hain. Stock tips aur guaranteed-return language hard-block hai. Publish se pehle human approval zaroori hai.</p>
+<form method="post" action="/admin/business/collect"><button>Naye business topics lao (0 token)</button></form>
+<form method="post" action="/admin/business/write"><input type="hidden" name="lang" value="en"><button class="g">Ek English business draft likho (token, 2-3 min)</button></form>
+<form method="post" action="/admin/business/write"><input type="hidden" name="lang" value="hi"><button class="g">Ek Hindi business draft likho (token, 2-3 min)</button></form>
+<p class="m"><a href="/admin/topics">Topics page</a> par pending business topic ka research chalao, phir yahan "Write" dabao. Auto-draft OFF rakho jab tak quality trust na ho.</p>
+${rows || '<p>Abhi koi business topic nahi. Upar "Naye business topics lao" dabao.</p>'}`);
   }
   if (p === '/admin/topics') {
     const { results } = await env.DB.prepare('SELECT id,query,traffic,status,source_count,research FROM topics ORDER BY id DESC LIMIT 60').all();
@@ -599,7 +679,7 @@ async function admin(req, env, p, url) {
     const hint = (cnt.ready || 0) > 0
       ? `<p class="note">${cnt.ready} ready topic hain${staleReady ? ` (${staleReady} ke sources purane hain - "Draft likho" dabane par pehle apne aap fresh sources aayenge)` : ''}. Neeche "Ready topic se ek draft likho" dabao, ya kisi topic ko kholkar "Approve: iska article likho" dabao.</p>`
       : '';
-    return A('Topics', `<h1>Trending topics</h1>${msg ? `<p class="note">${esc(msg)}</p>` : ''}${counts}${hint}<form method="post" action="/admin/topics/run"><button>Abhi trends + research chalao</button></form><form method="post" action="/admin/topics/research"><button class="g">Agla pending topic research karo (1 click = 1 result)</button></form><form method="post" action="/admin/card"><button class="g">Card banao (0 token, turant)</button></form><form method="post" action="/admin/write"><button class="g">Ready topic se ek draft likho (1-2 min lagenge, page band mat karna)</button></form>${results.map((r) => `<div class="card"><div class="p"><a href="/admin/topic/${r.id}"><b>${esc(r.query)}</b></a><div class="m"><span class="tag">${esc(r.status)}</span>${rowTag(r)} sources: ${r.source_count} &middot; ${esc(r.traffic)}</div></div></div>`).join('') || '<p>Abhi koi topic nahi. Upar ka button dabao.</p>'}`);
+    return A('Topics', `<p><a href="/admin/business">← Business page</a> | <a href="/admin">Admin</a></p><h1>Trending topics</h1>${msg ? `<p class="note">${esc(msg)}</p>` : ''}${counts}${hint}<form method="post" action="/admin/topics/run"><button>Abhi trends + research chalao</button></form><form method="post" action="/admin/topics/research"><button class="g">Agla pending topic research karo (1 click = 1 result)</button></form><form method="post" action="/admin/card"><button class="g">Card banao (0 token, turant)</button></form><form method="post" action="/admin/write"><button class="g">Ready topic se ek draft likho (1-2 min lagenge, page band mat karna)</button></form>${results.map((r) => `<div class="card"><div class="p"><a href="/admin/topic/${r.id}"><b>${esc(r.query)}</b></a><div class="m"><span class="tag">${esc(r.status)}</span>${rowTag(r)} sources: ${r.source_count} &middot; ${esc(r.traffic)}</div></div></div>`).join('') || '<p>Abhi koi topic nahi. Upar ka button dabao.</p>'}`);
   }
   const tm = p.match(/^\/admin\/topic\/(\d+)$/);
   if (tm) {
@@ -623,7 +703,11 @@ async function admin(req, env, p, url) {
     const dl = (dr && dr.ledger) || null;
     const claimLi = (arr, mark) => (arr || []).slice(0, 10).map((x) => `<li>${mark} ${esc(x.c || x.claim || '')} <span class="m">${esc((x.outlets || []).join(', ') || 'no outlet')}</span></li>`).join('');
     const debateHtml = !dr ? '' : `<div class="card"><div class="p"><b>Multi-AI debate (safe: Reporter / Analyst / Skeptic)</b> <span class="tag">${dr.ok ? 'checked' : 'fail'}</span><p class="m">${(dr.stats && dr.stats.verified) || 0} verified &middot; ${(dr.stats && dr.stats.singleSource) || 0} single-source &middot; ${(dr.stats && dr.stats.unsupported) || 0} unsupported &middot; ${(Math.round((dr.ms || 0) / 100) / 10)}s${dr.at ? ' &middot; ' + new Date((dr.at + 19800) * 1000).toISOString().replace('T', ' ').slice(0, 16) + ' IST' : ''}</p><p class="m">Roles: ${(dr.roles || []).map((x) => `${esc(x.name)} ${x.ok ? 'OK' : 'fail'} (${esc(x.provider || '-')}, ${x.claims || 0} claims)`).join(' &middot; ')}</p>${dl && (dl.verified || []).length ? `<p class="m"><b>Verified claims (2+ outlets):</b></p><ul>${claimLi(dl.verified, '&#10003;')}</ul>` : ''}${dl && (dl.singleSource || []).length ? `<details><summary>Single-source claims (${dl.singleSource.length}) - article me "ek report ke mutabik" hi likha jayega</summary><ul>${claimLi(dl.singleSource, '&#9888;')}</ul></details>` : ''}${dl && (dl.unsupported || []).length ? `<details><summary>Evidence nahi mila (${dl.unsupported.length}) - writer ko nahi diya jayega</summary><ul>${claimLi(dl.unsupported, '&#10007;')}</ul></details>` : ''}${(dr.errors || []).length ? `<p class="note">${esc((dr.errors || []).join(' | ').slice(0, 300))}</p>` : ''}</div></div>`;
-    const actions = `<div class="card"><div class="p"><b>Actions</b><form method="post" action="/admin/topic/${r.id}/research"><button class="o">Research dobara chalao (0 token, sources + pre-read)</button></form><form method="post" action="/admin/topic/${r.id}/debate"><button class="o">Multi-AI debate chalao (token, cross-check + claim ledger)</button></form><form method="post" action="/admin/topic/${r.id}/write"><button class="g">Approve: iska article likho (AI token lagenge, 1-2 min)</button></form><p class="m">Write dabane par debate pehle apne aap chalega (agar 2 ghante me nahi chala). Sirf code-verified claim ledger writer ko milta hai. Debate ek baar chala to write me wahi reuse hota hai.</p></div></div>`;
+    const bizTopic = d.mode === 'business' || r.traffic === 'business' || isBusinessMode(env);
+    const writeBtns = bizTopic
+      ? `<form method="post" action="/admin/topic/${r.id}/write" style="display:inline"><input type="hidden" name="lang" value="en"><button class="g">Write English business draft</button></form><form method="post" action="/admin/topic/${r.id}/write" style="display:inline"><input type="hidden" name="lang" value="hi"><button class="g">Write Hindi business draft</button></form>`
+      : `<form method="post" action="/admin/topic/${r.id}/write"><button class="g">Approve: iska article likho (AI token lagenge, 1-2 min)</button></form>`;
+    const actions = `<div class="card"><div class="p"><b>Actions</b><form method="post" action="/admin/topic/${r.id}/research"><button class="o">Research dobara chalao (0 token, sources + pre-read)</button></form><form method="post" action="/admin/topic/${r.id}/debate"><button class="o">Multi-AI debate chalao (token, cross-check + claim ledger)</button></form>${writeBtns}<p class="m">Write dabane par debate pehle apne aap chalega (agar 2 ghante me nahi chala). Sirf code-verified claim ledger writer ko milta hai. Debate ek baar chala to write me wahi reuse hota hai.${bizTopic ? ' Business draft me framework, counterpoint, playbook aur risks code se check honge; stock tip / guarantee language block hai.' : ''}</p></div></div>`;
     return A('Topic', `<h1>${esc(r.query)}</h1><p><span class="tag">${esc(r.status)}</span> ${esc(r.traffic)}</p>${tmsg ? `<p class="note">${esc(tmsg)}</p>` : ''}${pv}${pre}${debateHtml}${actions}${d.errors && d.errors.length ? `<p class="note">Provider errors: ${esc(d.errors.join(' | '))} (koshish: ${d.tried || 0} outlets)</p>` : ''}${d.reject_reason ? `<p class="note">Reject karne ki wajah: ${esc(d.reject_reason)}</p>` : ''}${d.park_reason ? `<p class="note">Abhi ruka hai (baad mein dobara try hoga): ${esc(d.park_reason)}</p>` : ''}${d.card ? `<div class="card"><div class="p"><b>Card: ${esc(d.card.hook)}</b> <span class="tag">${esc(d.card.label || '')}</span><ul>${(d.card.facts || []).map((f) => `<li>${esc(f.text)} <span class="m">(${esc((f.outlets || []).join(', '))})</span></li>`).join('')}</ul>${r.status === 'card_live' ? `<p><a href="/card/${r.id}" target="_blank">Card post dekho: /card/${r.id}</a></p>` : `<form method="post" action="/admin/topic/${r.id}/card-post"><button class="g">Card post banao (chhota AI call, turant live)</button></form>`}</div></div>` : ''}${d.diag ? `<p class="note">Pichli koshish ka hisaab: overlap ${Math.round((d.diag.overlap || 0) * 100)}%, sabse lambi copy ${d.diag.longest || 0} shabd, score ${d.diag.score}. Claims: ${esc((d.diag.claimList || []).map((x) => (x.ok ? 'OK' : 'FAIL(' + (x.why || '') + ')') + ' ' + x.c).join(' | ').slice(0, 900))}</p>` : ''}${d.check ? `<p class="note">Checks: ${esc(JSON.stringify(d.check))}</p>` : ''}${(d.sources || []).map((s) => `<div class="card"><div class="p"><b>${esc(s.source)}</b><br><a href="${esc(/^https?:\/\//i.test(String(s.url || '')) ? s.url : '#')}" target="_blank" rel="noopener">${esc(s.title)}</a><p class="m">${esc(s.snippet)}</p><p class="m">${(s.text || '').length} akshar text</p></div></div>`).join('') || '<p>Research abhi baaki hai.</p>'}<p><a href="/admin/topics">Back</a></p>`);
   }
 
@@ -775,8 +859,8 @@ ${approveBtns}${btn('reject', 'Reject', 'r')}${btn('to_draft', 'Back to draft', 
   const rows = results.map((r) => `<div class="card"><div class="p"><a href="/admin/post/${r.id}"><b>${esc(r.title)}</b></a><div class="m"><span class="tag">${esc(r.status)}</span> score: ${r.score ?? '-'}${r.publish_at ? ' | live: ' + new Date(r.publish_at * 1000).toISOString().replace('T', ' ').slice(0, 16) + ' UTC' : ''}</div></div></div>`).join('');
   const aw = (await getSetting(env, 'auto_write')) === '1', ap = (await getSetting(env, 'auto_publish')) === '1';
   let lw = null; try { lw = JSON.parse(await getSetting(env, 'last_write', '')); } catch {}
-  const lwHtml = lw ? `<p class="note">Aakhri auto-draft koshish (${new Date((lw.at + 19800) * 1000).toISOString().replace('T', ' ').slice(0, 16)} IST): ${lw.ok ? 'draft bana: ' : 'nahi bana: '}${esc(lw.msg)}</p>` : '<p class="m">Auto-draft ne abhi tak koi koshish record nahi ki.</p>';
+  const lwHtml = lw ? `<p class="note">Aakhri auto-draft koshish (${new Date((lw.at + 19800) * 1000).toISOString().replace('T', ' ').slice(0, 16)} IST): ${esc(lw.msg)}</p>` : '<p class="m">Auto-draft ne abhi tak koi koshish record nahi ki.</p>';
   const sw = (k, on, label) => `<form method="post" action="/admin/setting"><input type="hidden" name="k" value="${k}"><input type="hidden" name="v" value="${on ? 0 : 1}"><button class="${on ? 'g' : 'o'}">${label}: ${on ? 'ON (band karne ke liye dabao)' : 'OFF (chalu karne ke liye dabao)'}</button></form>`;
-  const panel = `<div class="card"><div class="p"><b>Switches</b>${sw('auto_write', aw, 'Auto-draft (har ghante AI khud draft likhe)')}${sw('auto_publish', ap, 'AI auto-publish (draft khud live kare)')}${lwHtml}<p class="m">Auto-draft OFF ho to draft sirf tab banega jab tum Topics page par green button dabaoge. AI auto-publish ON ho to score ${esc(env.AUTO_APPROVE_MIN_SCORE || 95)} ya zyada wale drafts, ${esc(env.AUTO_APPROVE_HOURS || 0)} ghante tak tumne kuch na kiya to, khud live ho jayenge. Note: auto-publish sirf tab hoga jab check_json me verified true ho (analysis + har claim ka sabut pass) aur SCORE_MAX ki limit cross ho. Default SCORE_MAX 94 hai, isliye auto-publish practically OFF hai - ye AdSense safety ke liye jaan-boojh kar hai. Dono OFF = har post tum khud approve karoge.</p></div></div>`;
-  return A('Admin', `<p><a href="/admin/new">+ New test draft</a> | <a href="/admin/topics">Topics</a> | <a href="/admin/ai-test">AI test</a> | <a href="/admin/api-status">API status</a> | <a href="/" target="_blank">Site</a> | <a href="/admin/logout">Logout</a></p>${panel}${rows || '<p>Koi post nahi.</p>'}`);
+  const panel = `<div class="card"><div class="p"><b>Switches</b>${sw('auto_write', aw, 'Auto-draft (har ghante AI khud draft likhe)')}${sw('auto_publish', ap, 'AI auto-publish (draft khud live kare)')}${lwHtml}<p class="m">Auto-draft ON = cron har ghante try karega, par ek din me max <b>${esc(env.BUSINESS_DAILY_LIMIT || env.DAILY_POST_LIMIT || 3)}</b> draft banenge aur approval queue <b>${esc(env.AUTO_DRAFT_QUEUE_MAX || 6)}</b> drafts par ruk jayegi. Jo draft business gate ya score ${esc(env.AUTO_DRAFT_MIN_SCORE || 60)} se neeche hai wo auto-reject ho jayega, taaki tumhe sirf acche drafts dikhein. Auto-draft OFF ho to draft sirf tab banega jab tum Topics page par green button dabaoge. Auto-publish ON ho to score ${esc(env.AUTO_APPROVE_MIN_SCORE || 95)} ya zyada wale drafts, ${esc(env.AUTO_APPROVE_HOURS || 0)} ghante tak tumne kuch na kiya to, khud live ho jayenge. Note: auto-publish sirf tab hoga jab check_json me verified true ho (analysis + har claim ka sabut pass) aur SCORE_MAX ki limit cross ho. Default SCORE_MAX 94 hai, isliye auto-publish practically OFF hai - ye AdSense safety ke liye jaan-boojh kar hai. Dono OFF = har post tum khud approve karoge.</p></div></div>`;
+  return A('Admin', `<p><a href="/admin/new">+ New test draft</a> | <a href="/admin/business">Business</a> | <a href="/admin/topics">Topics</a> | <a href="/admin/ai-test">AI test</a> | <a href="/admin/api-status">API status</a> | <a href="/" target="_blank">Site</a> | <a href="/admin/logout">Logout</a></p>${panel}${rows || '<p>Koi post nahi.</p>'}`);
 }

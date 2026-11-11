@@ -177,7 +177,7 @@ export async function runDebate(env, opts = {}) {
   }
 
   try {
-    const roles = DEBATE_ROLES.slice(0, maxRoles);
+    const roles = (Array.isArray(opts.roles) && opts.roles.length ? opts.roles : DEBATE_ROLES).slice(0, maxRoles);
     const providers = debateProviders(env);
 
     const roleRuns = roles.map((role, i) => {

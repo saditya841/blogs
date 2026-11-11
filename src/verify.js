@@ -74,9 +74,10 @@ export function parseEntail(raw, n) {
 
 // ---- 3) code-only guards on the whole article (title + summary + body) ----
 // numbers with 2+ digits (or decimals) that never occur in the notes: invented figures / dates
-export function numbersNotIn(text, notesText) {
+export function numbersNotIn(text, notesText, allowed = []) {
   const have = new Set(numbersIn(notesText));
-  return [...new Set(numbersIn(text))].filter((n) => (n.length >= 2 || n.includes('.')) && !have.has(n)).slice(0, 10);
+  const extra = new Set((allowed || []).map(String));
+  return [...new Set(numbersIn(text))].filter((n) => (n.length >= 2 || n.includes('.')) && !have.has(n) && !extra.has(n)).slice(0, 10);
 }
 // Capitalised Latin-script words (names, brands, acronyms) that never occur in the notes. English posts skip a lone capitalised word that starts a sentence.
 export function latinNotIn(text, notesText, lang = 'hi') {

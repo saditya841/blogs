@@ -16,11 +16,13 @@
 
 import { runAI } from './ai.js';
 import { groundedCheck, numbersNotIn, latinNotIn } from './verify.js';
+import { derivedNumbers } from './business.js';
 
 const countWords = (s) => String(s || '').split(/\s+/).filter(Boolean).length;
 
 // Hindi heading is Devanagari on purpose: Latin heading words would otherwise look like invented names.
-const ANALYSIS_RE = /^##\s*(?:विश्लेषण|विश्लेषण\s*:|analysis|vishleshan|virall take|iska matlab|isaka matlab|why it matters)\s*$/im;
+// Business mode uses its own section names; all of them count as "original value" sections.
+const ANALYSIS_RE = /^##\s*(?:विश्लेषण|analysis|vishleshan|virall take|iska matlab|isaka matlab|why it matters|bottom line|निचोड़|framework|what is not confirmed|what could go wrong|operator playbook|the money engine)\s*$/im;
 
 export const hasAnalysisSection = (body) => ANALYSIS_RE.test(String(body || ''));
 
@@ -53,7 +55,8 @@ export function parseEditor(text) {
 
 const hostOf = (u) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return ''; } };
 
-export function editorMessages(env, article, sources, feedback = '') {
+export function editorMessages(env, article, sources, feedback = '', opts = {}) {
+  if (opts.business) return businessEditorMessages(env, article, sources, feedback, opts);
   const lang = /^en/i.test(String((env && env.POST_LANG) || '')) ? 'en' : 'hi';
   const langName = lang === 'en' ? 'English' : 'Hindi (Devanagari script)';
   const analysisHeading = lang === 'en' ? '## Analysis' : '## विश्लेषण';
@@ -92,6 +95,53 @@ export function editorMessages(env, article, sources, feedback = '') {
   return [{ role: 'system', content: system }, { role: 'user', content: user }];
 }
 
+// Business editor: same code-verified claim discipline, but allows a longer, framework-driven
+// structure and treats arithmetic as a calculation (not a factual claim) when inputs are sourced.
+export function businessEditorMessages(env, article, sources, feedback = '', opts = {}) {
+  const lang = opts.lang === 'hi' ? 'hi' : 'en';
+  const langName = lang === 'en' ? 'English' : 'Hindi (Devanagari script)';
+  const hostOf = (u) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return ''; } };
+  const srcBlock = sources
+    .slice(0, 6)
+    .map((s, i) => `[${i + 1}] ${s.title || hostOf(s.url) || 'source'}${hostOf(s.url) ? ' (' + hostOf(s.url) + ')' : ''}${s.date ? ' - ' + new Date(s.date * 1000).toISOString().slice(0, 10) : ''}\n${String(s.text || '').slice(0, 2000)}`)
+    .join('\n\n');
+
+  const system =
+    'You are a strict business editor and fact-checker for an Indian business publication. ' +
+    'You may only use facts that appear in the SOURCES. Never add a name, number, date, quote, place, result or claim ' +
+    'that is not in the sources. Never copy 6 or more words in a row from a source. ' +
+    'A calculation is allowed only when it is written as `A / B = C` or `A - B = C`, A and B appear in the sources, ' +
+    'and the arithmetic is correct. Label every estimate with the word estimate and show its sourced inputs. ' +
+    'Never write guarantees, get-rich promises, stock tips, buy/sell advice or target prices. ' +
+    'Your analysis may connect facts and apply a framework, but it must not present opinions or predictions as facts.';
+
+  const user =
+    `TITLE: ${article.title || ''}\nSUMMARY: ${article.summary || ''}\n\nDRAFT BODY:\n${article.body || ''}\n\n` +
+    `SOURCES:\n${srcBlock}\n\n` +
+    'Task 1 - EDIT the draft:\n' +
+    `- Keep it ${langName}, 900 to 1300 words, 6 to 8 sub-headings written as lines starting with ##\n` +
+    '- The article must keep these sections: a specific setup, the money engine, a named framework applied to the case, ' +
+    'the strongest counterpoint, an operator playbook, what could go wrong, what is not confirmed, and a final ## Analysis section.\n' +
+    '- Remove anything the sources do not support. Do not guess or fill gaps. If a detail is missing, say it is not confirmed.\n' +
+    '- Keep every sourced number. If a number is an estimate, write "estimate" next to it and show the sourced inputs.\n' +
+    '- No markdown bold, no bullet lists in the body, no quotation marks. Headings only as lines starting with ##.\n' +
+    '- No generic opening and no motivational language.\n\n' +
+    'Task 2 - LIST THE FACTS:\n' +
+    '- Write one line for every factual claim in the final article:\n' +
+    '  CLAIM: <short claim from the article> || EVIDENCE: <exact words copied from a source that prove it>\n' +
+    '- List 8 to 12 claims. If a sentence has no exact evidence, remove that sentence from the article instead of listing it.\n' +
+    '- Do NOT list a calculation as a claim. List the sourced inputs used in the calculation instead.\n' +
+    '- The EVIDENCE must be an exact phrase from the SOURCES (not your paraphrase).\n\n' +
+    'Return EXACTLY this format:\n' +
+    'CLAIMS:\n' +
+    'CLAIM: ... || EVIDENCE: ...\n' +
+    'BODY:\n' +
+    '(the final edited article)' +
+    (feedback ? `\n\nFIX THESE PROBLEMS FROM THE LAST ATTEMPT:\n${feedback}` : '');
+
+  return [{ role: 'system', content: system }, { role: 'user', content: user }];
+}
+
 function sentenceCount(text) {
   return String(text || '').split(/[।.!?\n]+/).filter((s) => s.trim().length >= 8).length;
 }
@@ -115,9 +165,12 @@ export function evaluateEditorOutput(text, article, sources, opts = {}) {
 
   const claims = groundedCheck(parsed.claimText, notes);
   const checkText = stripAnalysisHeading(`${current.title}\n${current.summary}\n${current.body}`);
-  const nums = numbersNotIn(checkText, notes);
+  const allow = opts.business ? derivedNumbers(current.body, notes) : [];
+  const nums = numbersNotIn(checkText, notes, allow);
   const names = latinNotIn(checkText, notes, lang);
-  const expected = expectedClaimCount(current);
+  const expected = opts.business
+    ? Math.max(6, Math.min(12, Math.floor(sentenceCount(`${current.title}\n${current.summary}\n${current.body}`) / 5)))
+    : expectedClaimCount(current);
   const unsupported = claims.filter((c) => !c.ok);
   const coverageLow = claims.length < expected;
   const hasAnalysis = hasAnalysisSection(current.body);
@@ -158,7 +211,7 @@ export async function factCheck(env, article, sources, opts = {}) {
   for (let round = 0; round <= maxRounds; round++) {
     let ai;
     try {
-      ai = await runAI(env, editorMessages(env, current, sources, feedback), { max_tokens: 6000, temperature: 0.2 });
+      ai = await runAI(env, editorMessages(env, current, sources, feedback, { business: !!opts.business, lang }), { max_tokens: opts.business ? 8000 : 6000, temperature: 0.2 });
     } catch (e) {
       return {
         verified: false, coverageLow: true, unsupportedCount: 1, claims: 0, supported: 0,
