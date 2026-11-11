@@ -124,8 +124,8 @@ export function rotateProviders(list, i) {
 }
 
 const emptyLedger = (minAgree) => ({
-  version: 1, minAgree, items: [], verified: [], singleSource: [], unsupported: [],
-  stats: { total: 0, verified: 0, singleSource: 0, unsupported: 0 }
+  version: 1, minAgree, items: [], verified: [], singleSource: [], unsupported: [], conflict: [],
+  stats: { total: 0, verified: 0, singleSource: 0, unsupported: 0, conflict: 0 }
 });
 
 // A hard cap so one slow provider cannot hold the whole write click forever.

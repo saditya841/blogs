@@ -28,6 +28,10 @@ import { brandedImage } from './media.js';
 import { runDebate, debateBrief, debateMeta, ledgerTextFromMeta } from './debate.js';
 import { fingerprint, findDuplicate, loadExistingFingerprints, saveFingerprint } from './similarity.js';
 import { styleCheck, styleMeta } from './style.js';
+import { originality } from './originality.js';
+import { specificity, specificityMeta } from './specificity.js';
+import { loadVoiceProfile, voiceCheck, voiceMeta } from './voice.js';
+import { saveFacts, linkPostFacts } from './factregistry.js';
 
 const now = () => Math.floor(Date.now() / 1000);
 export { CATS }; // single source of truth (validate.js)
@@ -104,7 +108,20 @@ export function scoreDraft(m) {
   if (m.hasAnalysis === false) { s -= 6; notes.push('Vishleshan/analysis section nahi hai'); }
   if (m.coverageLow === true) { s -= 6; notes.push('Fact-check ne kam claims diye'); }
   if (m.verified === false) { s -= 12; notes.push('AI fact-check pass nahi hua'); }
-  if (m.stylePenalty) { s -= Math.min(15, Number(m.stylePenalty) || 0); notes.push(`Style guard: ${m.stylePenalty} points kate (machine jaisi bhasha/rhythm)`); }
+  // qualityPenalty = style + originality + specificity + site-voice, already capped by writeOne.
+  // Older callers/tests only send stylePenalty, so that is still respected.
+  if (m.qualityPenalty) {
+    const qp = Math.max(0, Math.min(20, Number(m.qualityPenalty) || 0));
+    s -= qp;
+    notes.push(`Quality guard: ${qp} points kate (style/originality/specificity/site-voice)`);
+  } else if (m.stylePenalty) {
+    s -= Math.min(15, Number(m.stylePenalty) || 0);
+    notes.push(`Style guard: ${m.stylePenalty} points kate (machine jaisi bhasha/rhythm)`);
+  }
+  if (m.stylePenalty) {
+    const sp = Math.max(0, Number(m.stylePenalty) || 0);
+    if (sp) notes.push(`Style guard: ${sp} points (AI-jaisi bhasha/rhythm)`);
+  }
   return { score: Math.max(0, Math.min(100, Math.round(s))), notes };
 }
 
@@ -352,6 +369,26 @@ export async function writeOne(env, opts = {}) {
   const hasAnalysis = hasAnalysisSection(draft.body);
   // ZERO-token style guard: stock AI phrases, flat sentence rhythm, repeated openings/phrases.
   const style = styleCheck(draft.body, { lang: langOf(env), minScore: Number(env.STYLE_MIN_SCORE || 0) });
+  // ZERO-token quality layers (no extra AI token):
+  //  * originality — sentences that are still close to the sources even after the copy check,
+  //  * specificity — concrete names/numbers/dates vs vague filler,
+  //  * site voice — does this read like THIS site's approved posts (learned from the last 10).
+  const orig = originality(draft.body, sources, {
+    n: Number(env.ORIGINALITY_N || 6),
+    copiedAt: Number(env.ORIGINALITY_COPIED_AT || 0.3),
+    target: Number(env.ORIGINALITY_TARGET || 0.85)
+  });
+  const spec = specificity(draft.body, {
+    low: Number(env.SPECIFICITY_LOW || 3),
+    high: Number(env.SPECIFICITY_HIGH || 10)
+  });
+  const voiceProfile = ['false', '0', 'off', 'no'].includes(String(env.VOICE_PROFILE ?? 'true').trim().toLowerCase())
+    ? null
+    : await loadVoiceProfile(env, Number(env.VOICE_PROFILE_LIMIT || 10));
+  const voice = voiceCheck(draft.body, voiceProfile);
+  const qualityPenalty = Math.max(0, Math.min(20,
+    (Number(style.penalty) || 0) + (Number(orig.penalty) || 0) + (Number(spec.penalty) || 0) + (Number(voice.penalty) || 0)
+  ));
 
   const scored = scoreDraft({
     ...m,
@@ -365,7 +402,8 @@ export async function writeOne(env, opts = {}) {
     hasAnalysis,
     verified: fc.verified,
     coverageLow: fc.coverageLow,
-    stylePenalty: style.penalty
+    stylePenalty: style.penalty,
+    qualityPenalty
   });
   const notes = scored.notes;
   // Auto-publish is still capped at 94 by default, even when the fact-check passes. A human should approve the
@@ -423,6 +461,31 @@ export async function writeOne(env, opts = {}) {
     }
     : null;
 
+  // Everything the article could NOT establish is kept in check_json and shown to readers in a
+  // "Kya confirm nahi hai" box under the article. This is the honest-reporting part that keeps
+  // the site away from "made-up news" and low-value-content penalties.
+  const ledgerMeta = (debateMetaObj && debateMetaObj.ledger) || null;
+  const unconfirmed = [];
+  if (ledgerMeta) {
+    for (const x of (ledgerMeta.conflict || []).slice(0, 5)) {
+      unconfirmed.push({
+        kind: 'conflict',
+        text: String(x.c || x.claim || '').slice(0, 220),
+        detail: (x.conflictValues || []).map((v) => `${v.outlet}: ${v.value}${v.unit ? ' ' + v.unit : ''}`).join(', ')
+      });
+    }
+    for (const x of (ledgerMeta.singleSource || []).slice(0, 5)) {
+      unconfirmed.push({
+        kind: 'single',
+        text: String(x.c || x.claim || '').slice(0, 220),
+        detail: 'Sirf ek report me mila: ' + ((x.outlets || []).join(', ') || 'unknown')
+      });
+    }
+  }
+  for (const n of (fc.numbersNotInSources || []).slice(0, 4)) unconfirmed.push({ kind: 'number', text: `Aankda sources me confirm nahi hua: ${n}`, detail: '' });
+  for (const n of (fc.latinNotInSources || []).slice(0, 4)) unconfirmed.push({ kind: 'name', text: `Naam sources me confirm nahi hua: ${n}`, detail: '' });
+  const unconfirmedFinal = unconfirmed.slice(0, 12);
+
   // ---- 7. save draft + mark topic, in ONE atomic batch ----
   const row = {
     slug,
@@ -437,7 +500,27 @@ export async function writeOne(env, opts = {}) {
     sources: JSON.stringify(sources.map(({ text, content, snippet, summary, description, ...rest }) => rest)),
     score,
     word_count: words,
-    check_json: JSON.stringify({ ...fcMeta, overlap: finalCc.overlap, newest_source: newestSource, lang: langOf(env), preread: prereadMeta, style: styleMeta(style), duplicate: duplicateInfo, debate: debatePostMeta }),
+    check_json: JSON.stringify({
+      ...fcMeta,
+      overlap: finalCc.overlap,
+      newest_source: newestSource,
+      lang: langOf(env),
+      preread: prereadMeta,
+      style: styleMeta(style),
+      originality: { score: orig.score, copied: orig.copied, total: orig.total, penalty: orig.penalty, notes: (orig.notes || []).slice(0, 4) },
+      specificity: specificityMeta(spec),
+      voice: voiceMeta(voice),
+      quality: {
+        penalty: qualityPenalty,
+        style: Number(style.penalty) || 0,
+        originality: Number(orig.penalty) || 0,
+        specificity: Number(spec.penalty) || 0,
+        voice: Number(voice.penalty) || 0
+      },
+      unconfirmed: unconfirmedFinal,
+      duplicate: duplicateInfo,
+      debate: debatePostMeta
+    }),
     created_at: ts,
     updated_at: ts,
     featured_image: featured,
@@ -462,6 +545,20 @@ export async function writeOne(env, opts = {}) {
   }
   if (postId) await saveFingerprint(env, postId, `${draft.title} ${draft.summary || ''}`, draft.body);
 
+  // Permanent fact record (ZERO token): every code-verified claim + its outlets, linked to this post.
+  // If an official later changes a number, the review page flags the fact as stale.
+  if (postId && ledgerMeta && !['false', '0', 'off', 'no'].includes(String(env.FACT_REGISTRY ?? 'true').trim().toLowerCase())) {
+    try {
+      const wantFacts = (ledgerMeta.verified || []).slice(0, 15).map((x) => ({ text: x.c || x.claim || '', outlets: x.outlets || [] }));
+      if (wantFacts.length) {
+        const ids = await saveFacts(env, topic.id, wantFacts);
+        if (ids.length) await linkPostFacts(env, postId, ids);
+      }
+    } catch (e) {
+      console.log('fact registry skipped:', e && e.message);
+    }
+  }
+
   console.log(JSON.stringify({ writeOne: 'ok', postId, provider: ai.provider, model: ai.model, score, words, overlap: Math.round(finalCc.overlap * 100), verified: !!fc.verified, claims: fc.claims || 0 }));
 
   return {
@@ -483,6 +580,11 @@ export async function writeOne(env, opts = {}) {
     imageProvider: (img && img.provider) || null,
     styleScore: style.score,
     stylePenalty: style.penalty,
+    qualityPenalty,
+    originalityScore: orig.score,
+    specificityScore: spec.score,
+    voiceScore: voice.score,
+    unconfirmed: unconfirmedFinal.length,
     duplicateChecked: duplicateInfo.checked,
     debateVerified: (debateMetaObj && debateMetaObj.stats && debateMetaObj.stats.verified) || 0,
     warnings: notes

@@ -11,6 +11,7 @@
 // Everything else is "unsupported" and must not be used by the writer.
 
 import { groundedCheck, tok, shingles } from './verify.js';
+import { claimConflict, conflictSummary } from './conflicts.js';
 
 const clean = (s) => String(s || '').replace(/^["'“”‘’\s]+|["'“”‘’\s]+$/g, '').replace(/\s+/g, ' ').trim();
 
@@ -105,13 +106,19 @@ export function buildLedger(items, sources, opts = {}) {
 
   for (const it of merged) {
     it.outletCount = it.outlets.length;
-    it.agreed = it.ok && it.outletCount >= minAgree;
-    it.status = !it.ok ? 'unsupported' : (it.agreed ? 'verified' : 'single-source');
+    // Two outlets can carry the same claim with different numbers. Code catches that here.
+    const cf = it.ok ? claimConflict(it.claim, sources) : { conflict: false, values: [] };
+    it.conflict = !!cf.conflict;
+    it.conflictValues = cf.values || [];
+    it.conflictText = it.conflict ? conflictSummary(it.conflictValues) : '';
+    it.agreed = it.ok && it.outletCount >= minAgree && !it.conflict;
+    it.status = !it.ok ? 'unsupported' : (it.conflict ? 'conflict' : (it.agreed ? 'verified' : 'single-source'));
   }
 
   const verified = merged.filter((x) => x.status === 'verified');
   const singleSource = merged.filter((x) => x.status === 'single-source');
   const unsupported = merged.filter((x) => x.status === 'unsupported');
+  const conflict = merged.filter((x) => x.status === 'conflict');
 
   return {
     version: 1,
@@ -120,11 +127,13 @@ export function buildLedger(items, sources, opts = {}) {
     verified,
     singleSource,
     unsupported,
+    conflict,
     stats: {
       total: merged.length,
       verified: verified.length,
       singleSource: singleSource.length,
-      unsupported: unsupported.length
+      unsupported: unsupported.length,
+      conflict: conflict.length
     }
   };
 }
@@ -133,7 +142,8 @@ const compact = (x, n = 220) => ({
   c: String(x.claim || '').slice(0, n),
   e: String(x.evidence || '').slice(0, n + 80),
   outlets: (x.outlets || []).slice(0, 4),
-  support: (x.support || []).slice(0, 4)
+  support: (x.support || []).slice(0, 4),
+  conflictValues: (x.conflictValues || []).slice(0, 4)
 });
 
 // What the writer sees. Only verified + clearly-labelled single-source claims are allowed.
@@ -143,10 +153,15 @@ export function ledgerText(ledger, opts = {}) {
   const v = (ledger.verified || []).slice(0, max);
   const s = (ledger.singleSource || []).slice(0, Math.min(4, max));
   const u = (ledger.unsupported || []).slice(0, 4);
+  const c = (ledger.conflict || []).slice(0, 4);
   const lines = [];
   if (v.length) {
     lines.push('VERIFIED CLAIMS (code-checked + 2 or more independent outlets). Use these as the main facts:');
     for (const x of v) lines.push(`- ${x.claim} [outlets: ${(x.outlets || []).join(', ')}]`);
+  }
+  if (c.length) {
+    lines.push('CONFLICTS (sources give different values for the same fact). Either leave the number out or write clearly that reports differ. Never pick one value as the truth:');
+    for (const x of c) lines.push(`- ${x.claim} [${x.conflictText || 'reports differ'}]`);
   }
   if (s.length) {
     lines.push('SINGLE-SOURCE CLAIMS (only one outlet says this). You may mention it only as "one report says", never as established fact:');
@@ -169,6 +184,7 @@ export function ledgerTextFromMeta(meta, opts = {}) {
   };
   const lines = [
     ...map(meta.verified, 'VERIFIED CLAIMS (code-checked + 2 or more independent outlets). Use these as the main facts:'),
+    ...map(meta.conflict, 'CONFLICTS (sources give different values). Leave the number out or write that reports differ. Never pick one value as the truth:'),
     ...map(meta.singleSource, 'SINGLE-SOURCE CLAIMS (only one outlet says this). You may mention it only as "one report says", never as established fact:'),
     ...map(meta.unsupported, 'NOT ALLOWED (evidence missing in sources). Never write these:')
   ];
@@ -182,9 +198,10 @@ export function ledgerMeta(ledger, opts = {}) {
   return {
     version: 1,
     minAgree: ledger.minAgree || 0,
-    stats: ledger.stats || { total: 0, verified: 0, singleSource: 0, unsupported: 0 },
+    stats: ledger.stats || { total: 0, verified: 0, singleSource: 0, unsupported: 0, conflict: 0 },
     verified: (ledger.verified || []).slice(0, cap).map((x) => compact(x)),
     singleSource: (ledger.singleSource || []).slice(0, cap).map((x) => compact(x)),
-    unsupported: (ledger.unsupported || []).slice(0, cap).map((x) => compact(x))
+    unsupported: (ledger.unsupported || []).slice(0, cap).map((x) => compact(x)),
+    conflict: (ledger.conflict || []).slice(0, cap).map((x) => compact(x))
   };
 }

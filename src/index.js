@@ -9,6 +9,9 @@ import { validatePost } from './validate.js';
 import { handleAPIStatus } from './admin-api-status.js';
 import { generateSVGThumbnail, svgToDataUrl } from './viral-thumbnail-generator.js';
 import { runDebate, debateMeta } from './debate.js';
+import { addCorrection, correctionsForPost, recentCorrections, correctionLine } from './corrections.js';
+import { staleFacts, markPostFactsVerified } from './factregistry.js';
+import { recheckSources } from './sourcecheck.js';
 
 const now = () => Math.floor(Date.now() / 1000);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -71,7 +74,7 @@ ${o.canonical ? `<meta property="og:url" content="${esc(o.canonical)}">` : ''}${
 <header><div class="w"><a class="logo" href="${o.admin ? '/admin' : '/'}">${esc(name)}${o.admin ? ' Admin' : ''}</a>
 ${o.admin ? '' : `<nav>${cats.map((c) => `<a href="/category/${encodeURIComponent(c.category)}">${esc(c.category)}</a>`).join('')}</nav>`}</div></header>
 <main class="w">${o.admin ? '' : `<form class="s" action="/search" method="get" role="search"><input name="q" placeholder="Search..." aria-label="Search"><button>Go</button></form>`}${body}</main>
-<footer>${o.admin ? '' : `<div><a href="/about">About</a><a href="/editorial-policy">Editorial Policy</a><a href="/contact">Contact</a><a href="/privacy-policy">Privacy</a><a href="/terms">Terms</a><a href="/disclaimer">Disclaimer</a><a href="/feed.xml">RSS</a></div>`}
+<footer>${o.admin ? '' : `<div><a href="/about">About</a><a href="/author">Author</a><a href="/editorial-policy">Editorial Policy</a><a href="/corrections">Corrections</a><a href="/contact">Contact</a><a href="/privacy-policy">Privacy</a><a href="/terms">Terms</a><a href="/disclaimer">Disclaimer</a><a href="/feed.xml">RSS</a></div>`}
 <div>&copy; ${new Date().getUTCFullYear()} ${esc(name)}</div></footer></body></html>`;
 }
 
@@ -92,6 +95,21 @@ const ytId = (u) => { const m = String(u || '').match(/(?:youtu\.be\/|v=|embed\/
 // Google supports Unicode URLs, so we keep the letters of any script and only replace punctuation.
 const slugify = (t) => (String(t).toLowerCase().normalize('NFC').replace(/[^\p{L}\p{M}\p{N}]+/gu, '-').replace(/^-|-$/g, '').slice(0, 70) || 'post') + '-' + Math.random().toString(36).slice(2, 7);
 const postHref = (slug) => '/post/' + encodeURIComponent(String(slug || ''));
+// How much of the body a human actually changed. Used by the human-edit gate:
+// an admin must either write a real note or rewrite a real chunk of the article.
+const changedChars = (a, b) => {
+  const A = String(a || '').trim().split(/\s+/).filter(Boolean);
+  const B = String(b || '').trim().split(/\s+/).filter(Boolean);
+  if (!A.length && !B.length) return 0;
+  if (!A.length || !B.length) return Math.max(String(a || '').length, String(b || '').length);
+  const grams = (arr) => { const s = new Set(); for (let i = 0; i + 4 <= arr.length; i++) s.add(arr.slice(i, i + 4).join(' ')); return s; };
+  const ga = grams(A), gb = grams(B);
+  let same = 0;
+  for (const g of ga) if (gb.has(g)) same++;
+  const base = Math.max(ga.size, gb.size) || 1;
+  return Math.round((1 - same / base) * Math.max(String(a || '').length, String(b || '').length));
+};
+const humanEditRequired = (env) => !['false', '0', 'off', 'no'].includes(String(env.REQUIRE_HUMAN_EDIT ?? 'true').trim().toLowerCase());
 const dec = (s) => { try { return decodeURIComponent(s); } catch { return null; } }; // broken %-encoding must be a 404, not a crash
 const pageOf = (url) => Math.max(1, Math.floor(Number(url.searchParams.get('page'))) || 1);
 const okImg = (u) => (String(u || '').startsWith('https://') ? u : null);
@@ -125,6 +143,7 @@ function staticPage(env, key) {
     'about': ['About Us', `<p>${n} is an independent news-and-explainer website. We watch what India is searching for, collect facts from multiple published sources, and write our own short, clear explainers so readers get the full picture in one place.</p><p>Every article lists the sources it was based on, and carries a publish date so you know how fresh it is.</p><p>Written by: <b>${esc(env.AUTHOR_NAME)}</b> (editorial desk). Questions or corrections: <a href="mailto:${mail}">${mail}</a>.</p>`],
     'editorial-policy': ['Editorial Policy', `<h2>How articles are made</h2><p>Topics come from public trend data. For each topic we collect reporting from at least three independent outlets, then draft an original article in our own words. Drafts are produced with the help of AI tools, checked claim-by-claim against the collected sources, tested for similarity to those sources, and then approved by a person or by our automated quality gate before they go live.</p><h2>What we do not do</h2><p>We do not copy text from other websites, publish unverified rumours as facts, or invent quotes. If sources disagree, we say so.</p><h2>Images and video</h2><p>Images come from openly licensed libraries and are credited under the picture. Videos are embedded from the original publisher.</p><h2>Corrections</h2><p>If you find an error, email <a href="mailto:${mail}">${mail}</a> with the page link. Confirmed errors are corrected quickly and the page is updated.</p>`],
     'contact': ['Contact Us', `<p>For corrections, copyright concerns, advertising or any feedback, email us at <a href="mailto:${mail}">${mail}</a>. We usually reply within 2-3 working days.</p>`],
+    'author': ['Author & Editorial Desk', `<p><b>${esc(env.AUTHOR_NAME || 'Virall Editorial Desk')}</b> is the byline used by the ${n} editorial desk. A real person on the desk reads every draft before it goes live, checks three random facts against the linked sources, edits the article where needed, and only then approves it.</p><h2>How we work</h2><p>We use AI tools for the first draft and for cross-checking, but code - not AI - decides whether a claim is supported by the sources. Drafts that fail the check stay unpublished. If you want to know exactly what was checked, every article links its sources and shows a "Kya confirm nahi hai" box for details we could not establish.</p><h2>Corrections</h2><p>Errors are corrected with a dated update note. See all recent corrections on the <a href="/corrections">corrections page</a>, or email <a href="mailto:${mail}">${mail}</a>.</p><h2>Contact</h2><p>Editorial desk: <a href="mailto:${mail}">${mail}</a></p>`],
     'privacy-policy': ['Privacy Policy', `<p>Last updated: ${esc(env.POLICY_UPDATED || '2026-11-08')}. This policy explains what information ${n} (${s}) handles when you visit.</p><h2>Information we collect</h2><p>We do not ask visitors to create accounts. Our servers and hosting provider (Cloudflare) may log technical data such as IP address, browser type and pages visited, for security and performance.</p><h2>Cookies and advertising</h2><p>We may show ads served by Google AdSense. Google and its partners use cookies to serve ads based on your visits to this and other sites. You can opt out of personalised advertising at <a href="https://www.google.com/settings/ads">google.com/settings/ads</a>, and learn how Google uses data at <a href="https://policies.google.com/technologies/partner-sites">policies.google.com/technologies/partner-sites</a>. Where required by law (for example in the EEA and UK), consent is requested before personalised ads are shown.</p><h2>Third-party content</h2><p>Some pages embed YouTube videos (privacy-enhanced mode). Those services may set their own cookies when you play a video. Links to other sites are not under our control.</p><h2>Children</h2><p>This site is not directed at children under 13.</p><h2>Contact</h2><p><a href="mailto:${mail}">${mail}</a></p>`],
     'terms': ['Terms of Use', `<p>By using ${n} you agree to these terms. Content is provided for general information. You may share links and short excerpts with credit and a link back; you may not republish full articles without permission. We may change or remove content at any time. Use of the site is at your own risk.</p>`],
     'disclaimer': ['Disclaimer', `<p>Information on ${n} is compiled from public sources and is provided for general information only. It is not legal, financial, medical or investment advice. We try to keep articles accurate but cannot guarantee completeness. Please verify important details from official sources before acting on them.</p>`],
@@ -208,6 +227,9 @@ async function autoApprove(env) {
   for (const p of results) {
     // strict: no fact-check record, an unsupported claim, a stale source or a missing required field => a human decides
     if (!validatePost(p, { check: parseCheck(p), strict: true }).ok) continue;
+    // A human must have read and edited this draft first (unless REQUIRE_HUMAN_EDIT is explicitly off).
+    // No human_edited_at = NO auto-publish. This is the main "written by a person" safety layer.
+    if (humanEditRequired(env) && !p.human_edited_at) continue;
     await env.DB.prepare(`UPDATE posts SET status='approved', publish_at=?1 + (abs(random()) % 3600), updated_at=?1 WHERE id=?2 AND status='draft'`).bind(now(), p.id).run();
   }
 }
@@ -288,19 +310,24 @@ export default {
     const url = new URL(req.url), p = url.pathname.replace(/\/+$/, '') || '/', site = env.SITE_URL || url.origin;
     const t = now();
 
-    if (p === '/robots.txt') return new Response(`User-agent: *\nAllow: /\nDisallow: /admin\nDisallow: /search\n\nSitemap: ${site}/sitemap.xml\n`, { headers: { 'Content-Type': 'text/plain' } });
+    if (p === '/robots.txt') return new Response(`User-agent: *\nAllow: /\nDisallow: /admin\nDisallow: /search\n\nSitemap: ${site}/sitemap.xml\nSitemap: ${site}/news-sitemap.xml\n`, { headers: { 'Content-Type': 'text/plain' } });
     if (p === '/ads.txt') { const pub = adsPub(env); return new Response(pub ? `google.com, ${pub}, DIRECT, f08c47fec0942fa0\n` : '# set ADSENSE_PUB\n', { headers: { 'Content-Type': 'text/plain' } }); }
     if (env.INDEXNOW_KEY && p === `/${env.INDEXNOW_KEY}.txt`) return new Response(env.INDEXNOW_KEY, { headers: { 'Content-Type': 'text/plain' } });
 
     if (p === '/sitemap.xml') {
       const { results } = await env.DB.prepare(`SELECT slug,image_url,publish_at,updated_at FROM posts WHERE ${LIVE} ORDER BY publish_at DESC LIMIT 5000`).bind(t).all();
       const cats = await env.DB.prepare(`SELECT DISTINCT category FROM posts WHERE ${LIVE} AND category IS NOT NULL AND category!=''`).bind(t).all();
-      const st = ['about', 'editorial-policy', 'contact', 'privacy-policy', 'terms', 'disclaimer'];
+      const st = ['about', 'editorial-policy', 'contact', 'privacy-policy', 'terms', 'disclaimer', 'author', 'corrections'];
       return xml(`<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:image="http://www.google.com/schemas/sitemap-image/1.1"><url><loc>${site}/</loc></url>${st.map((s) => `<url><loc>${site}/${s}</loc></url>`).join('')}${cats.results.map((c) => `<url><loc>${site}/category/${encodeURIComponent(c.category)}</loc></url>`).join('')}${results.map((r) => `<url><loc>${esc(site + postHref(r.slug))}</loc><lastmod>${new Date((r.updated_at || r.publish_at) * 1000).toISOString()}</lastmod>${okImg(r.image_url) ? `<image:image><image:loc>${esc(r.image_url)}</image:loc></image:image>` : ''}</url>`).join('')}</urlset>`);
     }
     if (p === '/feed.xml') {
       const { results } = await env.DB.prepare(`SELECT slug,title,summary,publish_at FROM posts WHERE ${LIVE} ORDER BY publish_at DESC LIMIT 50`).bind(t).all();
       return xml(`<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><title>${esc(env.SITE_NAME)}</title><link>${site}</link><description>${esc(env.SITE_TAGLINE)}</description><language>${esc(env.POST_LANG === 'en' ? 'en-in' : 'hi-in')}</language><lastBuildDate>${new Date().toUTCString()}</lastBuildDate>${results.map((r) => `<item><title>${esc(r.title)}</title><link>${esc(site + postHref(r.slug))}</link><guid>${esc(site + postHref(r.slug))}</guid><pubDate>${new Date(r.publish_at * 1000).toUTCString()}</pubDate><description>${esc(r.summary)}</description></item>`).join('')}</channel></rss>`);
+    }
+    // Google News sitemap: only the last 2 days (Google's rule for news sitemaps).
+    if (p === '/news-sitemap.xml') {
+      const { results } = await env.DB.prepare(`SELECT slug,title,publish_at FROM posts WHERE status='approved' AND publish_at<=?1 AND publish_at>=?2 ORDER BY publish_at DESC LIMIT 1000`).bind(t, t - 2 * 86400).all();
+      return xml(`<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:news="http://www.google.com/schemas/sitemap-news/0.9">${results.map((r) => `<url><loc>${esc(site + postHref(r.slug))}</loc><news:news><news:publication><news:name>${esc(env.SITE_NAME || 'Virall')}</news:name><news:language>${esc(env.POST_LANG === 'en' ? 'en' : 'hi')}</news:language></news:publication><news:publication_date>${new Date(r.publish_at * 1000).toISOString()}</news:publication_date><news:title>${esc(r.title)}</news:title></news:news></url>`).join('')}</urlset>`);
     }
 
     // ----- AI illustrations stored in D1 -----
@@ -365,6 +392,14 @@ export default {
       return L({ title: `Search: ${q}`, noindex: true, noAdScript: true }, `<h1>Search</h1>${q ? `<p>"${esc(q)}" ke ${rows.length} result</p>` : ''}<div class="grid">${rows.map(card).join('')}</div>`);
     }
 
+    if (p === '/corrections') {
+      const rows = await recentCorrections(env, 50);
+      const list = rows.length
+        ? rows.map((c) => `<div class="card"><div class="p"><b><a href="${postHref(c.slug)}">${esc(c.title)}</a></b><div class="m">${day(c.created_at)} &middot; ${esc(c.reason || 'Correction')}</div>${c.old_text ? `<p class="m"><s>${esc(c.old_text)}</s></p>` : ''}${c.new_text ? `<p>${esc(c.new_text)}</p>` : ''}</div></div>`).join('')
+        : '<p>Abhi tak koi correction darj nahi hua. Har article ke neeche "Correction bhejein" link hai.</p>';
+      return L({ title: 'Corrections & Updates', desc: 'Recent corrections and updates published on ' + (env.SITE_NAME || 'Virall'), canonical: `${site}/corrections`, lang: 'en' }, `<h1>Corrections & Updates</h1><p>We correct confirmed errors and add a dated update note to the article. Newest first.</p>${list}`);
+    }
+
     const sp = staticPage(env, p.slice(1));
     if (sp) return L({ title: sp.title, desc: sp.title + ' - ' + name, canonical: `${site}${p}`, lang: 'en' }, sp.body);
 
@@ -380,21 +415,32 @@ export default {
       let srcs = []; try { srcs = JSON.parse(r.sources || '[]'); } catch {}
       srcs = (Array.isArray(srcs) ? srcs : []).filter((s) => /^https?:\/\//i.test(String((s && s.url) || s || ''))); // only real web links (no javascript: etc.)
       const tags = String(r.tags || '').split(',').map((x) => x.trim()).filter(Boolean);
+      const ck = parseCheck(r);
+      const unc = (ck && Array.isArray(ck.unconfirmed)) ? ck.unconfirmed.filter((x) => x && x.text) : [];
+      const corr = await correctionsForPost(env, r.id);
+      const unconfirmedBox = unc.length
+        ? `<div class="note" style="margin:18px 0"><b>Kya confirm nahi hai</b><p class="m" style="margin:4px 0 8px">Ye baatein hum source se poora confirm nahi kar paye. Isliye inhe fact ki tarah nahi likha gaya:</p><ul>${unc.slice(0, 10).map((x) => `<li>${esc(x.text)}${x.detail ? ` <span class="m">(${esc(x.detail)})</span>` : ''}</li>`).join('')}</ul></div>`
+        : '';
+      const corrBox = corr.length
+        ? `<div class="note" style="margin:18px 0"><b>Corrections / Updates</b><ul>${corr.slice(0, 8).map((c) => `<li><b>${day(c.created_at)}:</b> ${esc(c.reason || 'Update')}${c.new_text ? `<br><span class="m">${esc(c.new_text)}</span>` : ''}</li>`).join('')}</ul></div>`
+        : '';
       const ld = jsonld({ '@context': 'https://schema.org', '@type': 'NewsArticle', headline: r.title.slice(0, 110), description: r.summary, image: okImg(r.image_url) ? [r.image_url] : undefined, datePublished: new Date(r.publish_at * 1000).toISOString(), dateModified: new Date((r.updated_at || r.publish_at) * 1000).toISOString(), inLanguage: r.lang || 'hi', mainEntityOfPage: canon, wordCount: wc, keywords: tags.join(', ') || undefined, articleSection: r.category || undefined, author: { '@type': 'Organization', name: env.AUTHOR_NAME, url: `${site}/about` }, publisher: { '@type': 'Organization', name, url: site } })
         + jsonld({ '@context': 'https://schema.org', '@type': 'BreadcrumbList', itemListElement: [{ '@type': 'ListItem', position: 1, name: 'Home', item: site + '/' }, ...(r.category ? [{ '@type': 'ListItem', position: 2, name: r.category, item: `${site}/category/${encodeURIComponent(r.category)}` }] : []), { '@type': 'ListItem', position: r.category ? 3 : 2, name: r.title }] });
       const enc = encodeURIComponent, shareT = enc(r.title), shareU = enc(canon);
       const b = `<div class="crumb"><a href="/">Home</a>${r.category ? ` &rsaquo; <a href="/category/${enc(r.category)}">${esc(r.category)}</a>` : ''}</div>
-<article><h1>${esc(r.title)}</h1><div class="m">By ${esc(env.AUTHOR_NAME)} &middot; Published ${day(r.publish_at)}${r.updated_at && r.updated_at - r.publish_at > 86400 ? ` &middot; Updated ${day(r.updated_at)}` : ''} &middot; ${Math.max(1, Math.round(wc / 200))} min read</div>
+<article><h1>${esc(r.title)}</h1><div class="m">By <a href="/author">${esc(env.AUTHOR_NAME)}</a> &middot; Published ${day(r.publish_at)}${r.updated_at && r.updated_at - r.publish_at > 86400 ? ` &middot; Updated ${day(r.updated_at)}` : ''} &middot; ${Math.max(1, Math.round(wc / 200))} min read</div>
 ${r.image_url ? `<p>${aiImg(r.image_url) ? thumb(r, true) : `<img class="hero" width="1200" height="675" fetchpriority="high" src="${esc(r.image_url)}" alt="${esc(r.title)}">`}<span class="m credit">Image: ${aiImg(r.image_url) ? 'AI-generated illustration' : esc(r.image_credit || 'source')}</span></p>` : `<p>${cover(r, true)}</p>`}
 <p><i>${esc(r.summary)}</i></p>
 ${h2s.length >= 3 ? `<nav class="toc" aria-label="Contents"><b>Contents</b><ol>${h2s.map((h) => `<li><a href="#${h.id}">${esc(h.t)}</a></li>`).join('')}</ol></nav>` : ''}
 ${bodyHtml}
+${unconfirmedBox}
 ${showAds ? `<div class="adwrap">${adSlot(env, 'ADSENSE_SLOT_BOTTOM')}</div>` : ''}
 ${v ? `<h2>Video</h2><div class="vid"><iframe loading="lazy" title="${esc(r.title)}" src="https://www.youtube-nocookie.com/embed/${v}" allowfullscreen></iframe></div>` : ''}
+${corrBox}
 ${srcs.length ? `<h2>Sources</h2><ul>${srcs.map((s) => `<li><a rel="nofollow noopener" target="_blank" href="${esc(s.url || s)}">${esc(s.title || s.url || s)}</a></li>`).join('')}</ul>` : ''}
 ${tags.length ? `<p>${tags.map((x) => `<a class="chip" href="/search?q=${enc(x)}">#${esc(x)}</a>`).join('')}</p>` : ''}
 <div class="share"><b>Share:</b> <a href="https://wa.me/?text=${shareT}%20${shareU}">WhatsApp</a><a href="https://t.me/share/url?url=${shareU}&text=${shareT}">Telegram</a><a href="https://twitter.com/intent/tweet?text=${shareT}&url=${shareU}">X</a><a href="https://www.facebook.com/sharer/sharer.php?u=${shareU}">Facebook</a></div>
-<p class="note">Yeh lekh AI ki madad se taiyar hua aur multiple sources se jaanch kar publish kiya gaya. Details: <a href="/editorial-policy">Editorial Policy</a>. Galti mile to <a href="/contact">hamein batayein</a>.</p></article>
+<p class="note">Yeh lekh AI ki madad se taiyar hua, code se har claim source ke saath milaya gaya, aur publish se pehle insaan ne padh kar approve kiya. Details: <a href="/editorial-policy">Editorial Policy</a>. Galti mile to <a href="/contact">hamein batayein</a> ya <a href="/corrections">correction</a> bhejein.</p></article>
 ${rel.length ? `<h2>Aur padhein</h2><div class="grid">${rel.map(card).join('')}</div>` : ''}`;
       return L({
         title: r.title, desc: r.summary, canonical: canon, image: okImg(r.image_url), type: 'article', lang: r.lang || 'hi', ld,
@@ -596,8 +642,81 @@ async function admin(req, env, p, url) {
         await env.DB.prepare('UPDATE posts SET image_url=?,image_credit=?,video_url=?,updated_at=? WHERE id=?').bind(okImg(f.get('image_url')), String(f.get('image_credit') || ''), String(f.get('video_url') || ''), tt, id).run();
         return go('/admin/post/' + id);
       }
+      // ---- human edit + approve (the real "written by a person" step) ----
+      if (a === 'human_approve') {
+        const pr = await env.DB.prepare('SELECT * FROM posts WHERE id=?').bind(id).first();
+        if (!pr) return go('/admin');
+        const note = String(f.get('note') || '').trim().slice(0, 600);
+        const bodyIn = String(f.get('body') || '').trim();
+        const claimsChecked = String(f.get('claims_checked') || '') === '1';
+        const bodyEdited = !!bodyIn && bodyIn !== String(pr.body || '').trim();
+        const changed = bodyEdited ? changedChars(pr.body, bodyIn) : 0;
+        const fail = (m) => go('/admin/post/' + id + '?vm=' + encodeURIComponent(m));
+        if (!claimsChecked) return fail('Pehle checkbox tick karo: "maine 3 random facts sources se mila liye". Ye human-check ka hissa hai.');
+        if (note.length < 30 && changed < 200) return fail(`Human edit gate: kam se kam 30 akshar ka note likho YA 200+ akshar ka body change karo. Abhi note ${note.length} akshar, body change ${changed} akshar. (Kuch bhi badalne ki zaroorat na ho to bhi note me likho ki tumne kya check kiya.)`);
+        // Source links can rot while a draft waits. Dead links stop the approval.
+        let srcCheck = null;
+        if (!['false', '0', 'off', 'no'].includes(String(env.SOURCE_RECHECK ?? 'true').trim().toLowerCase())) {
+          let srcs = []; try { srcs = JSON.parse(pr.sources || '[]'); } catch {}
+          try {
+            srcCheck = await recheckSources(srcs, {
+              max: Number(env.SOURCE_RECHECK_MAX || 3),
+              timeoutMs: Number(env.SOURCE_RECHECK_TIMEOUT_MS || 3000)
+            });
+          } catch { srcCheck = null; }
+          if (srcCheck && (srcCheck.dead.length >= 2 || (srcCheck.dead.length > 0 && srcCheck.okCount === 0))) {
+            return fail(`Source check fail: ${srcCheck.dead.length} link dead hain (${srcCheck.dead.join(', ')}). Article ka source update karo ya "Sources dobara check karo" dabao.`);
+          }
+        }
+        const newBody = bodyEdited ? bodyIn : String(pr.body || '');
+        const wc = words(newBody);
+        const vr = validatePost({ ...pr, body: newBody, word_count: wc }, { check: parseCheck(pr) });
+        if (!vr.ok) return fail('Approve nahi hua: ' + vr.errors.map((e) => e.msg).join('; '));
+        if (bodyEdited) {
+          await env.DB.prepare('UPDATE posts SET body=?,word_count=? WHERE id=?').bind(newBody, wc, id).run();
+          await addCorrection(env, id, String(pr.body || '').slice(0, 400), newBody.slice(0, 400), note || `Insaan ne lekh edit kiya (${changed} akshar badle)`);
+        }
+        const timing = String(f.get('timing') || 'now');
+        const pubAt = timing === 'random' ? tt + Math.floor(Math.random() * 3600) : tt;
+        let cj = parseCheck(pr) || {};
+        if (srcCheck) cj = { ...cj, source_check: { at: tt, checked: srcCheck.checked, okCount: srcCheck.okCount, dead: srcCheck.dead, unknown: srcCheck.unknown } };
+        await env.DB.prepare("UPDATE posts SET status='approved',publish_at=?,updated_at=?,pinged=0,human_edited_at=?,human_edit_note=?,check_json=? WHERE id=?")
+          .bind(pubAt, tt, tt, note || `Body edit (${changed} akshar badle)`, JSON.stringify(cj), id).run();
+        return go('/admin/post/' + id + '?msg=' + encodeURIComponent(`Human-check ke saath approve ho gaya${srcCheck ? ` (sources ${srcCheck.okCount}/${srcCheck.checked} live)` : ''}. Publish: ${new Date(pubAt * 1000).toUTCString()}`));
+      }
+      if (a === 'source_recheck') {
+        const pr = await env.DB.prepare('SELECT sources,check_json FROM posts WHERE id=?').bind(id).first();
+        let srcs = []; try { srcs = JSON.parse((pr && pr.sources) || '[]'); } catch {}
+        const sr = await recheckSources(srcs, { max: Number(env.SOURCE_RECHECK_MAX || 3), timeoutMs: Number(env.SOURCE_RECHECK_TIMEOUT_MS || 3000) });
+        if (pr) {
+          let cj = parseCheck(pr) || {};
+          cj = { ...cj, source_check: { at: tt, checked: sr.checked, okCount: sr.okCount, dead: sr.dead, unknown: sr.unknown } };
+          await env.DB.prepare('UPDATE posts SET check_json=? WHERE id=?').bind(JSON.stringify(cj), id).run();
+        }
+        const msg = sr.checked ? `Sources: ${sr.okCount}/${sr.checked} live${sr.dead.length ? ' | DEAD: ' + sr.dead.join(', ') : ''}${sr.unknown.length ? ' | status verify nahi hua: ' + sr.unknown.join(', ') : ''}` : (sr.reason || 'Koi http source nahi');
+        return go('/admin/post/' + id + '?msg=' + encodeURIComponent(msg));
+      }
+      if (a === 'add_correction') {
+        const pr = await env.DB.prepare('SELECT body FROM posts WHERE id=?').bind(id).first();
+        if (!pr) return go('/admin');
+        const reason = String(f.get('reason') || '').trim().slice(0, 300);
+        const oldText = String(f.get('old_text') || '').trim().slice(0, 400);
+        const newText = String(f.get('new_text') || '').trim().slice(0, 400);
+        if (reason.length < 10) return go('/admin/post/' + id + '?vm=' + encodeURIComponent('Correction reason kam se kam 10 akshar ka likho (kya galat tha).'));
+        const newBody = String(pr.body || '') + correctionLine(reason + (newText ? ': ' + newText : ''), tt);
+        await env.DB.prepare('UPDATE posts SET body=?,word_count=?,updated_at=? WHERE id=?').bind(newBody, words(newBody), tt, id).run();
+        const ok = await addCorrection(env, id, oldText, newText, reason);
+        return go('/admin/post/' + id + '?msg=' + encodeURIComponent(ok ? 'Correction darj ho gaya aur article ke neeche dated update line jud gayi.' : 'Correction save nahi hua (database error).'));
+      }
+      if (a === 'facts_ok') {
+        const n = await markPostFactsVerified(env, id);
+        return go('/admin/post/' + id + '?msg=' + encodeURIComponent(n ? `${n} facts ka last_verified time update ho gaya.` : 'Koi linked fact nahi mila.'));
+      }
       if ((a === 'approve_now' || a === 'approve_random') && f.get('force') !== '1') {
         const pr = await env.DB.prepare('SELECT * FROM posts WHERE id=?').bind(id).first();
+        if (humanEditRequired(env) && (!pr || !pr.human_edited_at)) {
+          return go('/admin/post/' + id + '?vm=' + encodeURIComponent('Human edit gate: neeche form me note (30+ akshar) ya body edit + "3 random facts" checkbox bharo, phir "Human-check ke saath approve" dabao. Turant publish karna ho to neeche red force button hai.'));
+        }
         const vr = pr ? validatePost(pr, { check: parseCheck(pr) }) : { ok: true, errors: [] };
         if (!vr.ok) return go('/admin/post/' + id + '?vm=' + encodeURIComponent('Approve nahi hua: ' + vr.errors.map((e) => e.msg).join('; ')));
       }
@@ -617,15 +736,37 @@ async function admin(req, env, p, url) {
     const act = '/admin/post/' + id + '/action', vid = ytId(r.video_url), mmsg = url.searchParams.get('msg');
     const mediaBlock = `<div class="card"><div class="p"><b>Image / Video</b>${mmsg ? `<p class="note">${esc(mmsg)}</p>` : ''}${r.image_credit ? `<p class="m">Image credit: ${esc(r.image_credit)}</p>` : ''}${vid ? `<div class="vid"><iframe loading="lazy" title="video" src="https://www.youtube-nocookie.com/embed/${vid}" allowfullscreen></iframe></div>` : '<p class="m">Abhi video nahi hai.</p>'}<form method="post" action="${act}"><input type="hidden" name="a" value="media_refresh"><input name="q" placeholder="English search words, jaise: Ann Li tennis"><button class="o">Thumbnail + video dobara banao</button></form><form method="post" action="${act}"><input type="hidden" name="a" value="save_media"><input name="image_url" value="${esc(r.image_url)}" placeholder="Image URL (https://...)"><input name="image_credit" value="${esc(r.image_credit)}" placeholder="Image credit"><input name="video_url" value="${esc(r.video_url)}" placeholder="YouTube link"><button>Image / video save karo</button></form></div></div>`;
     const vr = validatePost(r, { check: parseCheck(r) }), ck = parseCheck(r), vm = url.searchParams.get('vm');
+    const corrections = await correctionsForPost(env, id);
+    const stale = await staleFacts(env, id, Number(env.FACT_MAX_AGE_HOURS || 24));
+    const unc = (ck && Array.isArray(ck.unconfirmed)) ? ck.unconfirmed.filter((x) => x && x.text) : [];
     const li = (arr, icon, st) => arr.map((x) => `<p class="note"${st ? ` style="${st}"` : ''}>${icon} ${esc(x.msg)}</p>`).join('');
     const claimRows = ((ck && ck.claimList) || []).map((c) => `<li>${c.ok ? '&#10003;' : '&#10007;'} ${esc(c.c)}<br><span class="m">${esc(c.e)}</span></li>`).join('');
+    const uncHtml = unc.length
+      ? `<ul>${unc.map((x) => `<li>${esc(x.text)}${x.detail ? ` <span class="m">(${esc(x.detail)})</span>` : ''}</li>`).join('')}</ul>`
+      : '<p class="m">Sab kuch confirm hua (koi unconfirmed item nahi).</p>';
+    const q = ck && ck.quality;
+    const qHtml = q ? `<p class="m">Quality: originality ${ck.originality ? Math.round((ck.originality.score || 0) * 100) + '%' : '-'} &middot; specificity ${ck.specificity ? ck.specificity.score + '/100 (' + ck.specificity.per100 + ' details/100 shabd)' : '-'} &middot; site-voice ${ck.voice ? (ck.voice.compared ? ck.voice.score + '/100' : 'n/a (3+ approved posts chahiye)') : '-'}${q.penalty ? ` &middot; <b>${q.penalty} points kate</b>` : ' &middot; 0 points kate'}</p>` : '';
+    const staleHtml = stale.length
+      ? `<div class="note">${stale.length} fact 24 ghante se re-check nahi hue (official number badal sakta hai). Sources dobara padh kar confirm karo: <form method="post" action="${act}" style="display:inline"><input type="hidden" name="a" value="facts_ok"><button class="o" style="width:auto;padding:4px 10px">Facts aaj verify kiye</button></form><br><span class="m">${stale.slice(0, 3).map((f) => esc(f.text)).join(' | ')}</span></div>`
+      : '';
     const checkBlock = `<div class="card"><div class="p"><b>Publish se pehle jaanch</b>${vm ? `<p class="note">${esc(vm)}</p>` : ''}${li(vr.errors, '&#10060;', 'background:#fdecea;border-color:#f5c2c0')}${li(vr.warnings, '&#9888;&#65039;')}${vr.errors.length || vr.warnings.length ? '' : '<p class="m">Sab jaanch theek hain.</p>'}`
-      + `${ck ? `<p class="m">Fact-check: ${ck.supported}/${ck.claims} claims ka sabut sources mein mila, ${ck.fixRounds || 0} baar sudhaara gaya, copy overlap ${((ck.overlap || 0) * 100).toFixed(0)}%${ck.numbersNotInSources && ck.numbersNotInSources.length ? ' | sankhya sources mein nahi: ' + esc(ck.numbersNotInSources.join(', ')) : ''}${ck.latinNotInSources && ck.latinNotInSources.length ? ' | English naam sources mein nahi: ' + esc(ck.latinNotInSources.join(', ')) : ''}</p>${claimRows ? `<details><summary>Kya check hua (claim + sabut)</summary><ul>${claimRows}</ul></details>` : ''}` : '<p class="m">Is post ka fact-check record nahi hai.</p>'}${ck && (ck.style || ck.debate) ? `<p class="m">Style guard: ${ck.style ? `${ck.style.score}/100${ck.style.penalty ? ` (${ck.style.penalty} points kate: ${esc((ck.style.notes || []).slice(0, 3).join('; '))})` : ''}` : 'n/a'}${ck.debate ? ` | Multi-AI debate: ${(ck.debate.stats && ck.debate.stats.verified) || 0} verified claims` : ''}</p>` : ''}</div></div>`;
+      + `${ck ? `<p class="m">Fact-check: ${ck.supported}/${ck.claims} claims ka sabut sources mein mila, ${ck.fixRounds || 0} baar sudhaara gaya, copy overlap ${((ck.overlap || 0) * 100).toFixed(0)}%${ck.numbersNotInSources && ck.numbersNotInSources.length ? ' | sankhya sources mein nahi: ' + esc(ck.numbersNotInSources.join(', ')) : ''}${ck.latinNotInSources && ck.latinNotInSources.length ? ' | English naam sources mein nahi: ' + esc(ck.latinNotInSources.join(', ')) : ''}</p>${claimRows ? `<details><summary>Kya check hua (claim + sabut)</summary><ul>${claimRows}</ul></details>` : ''}` : '<p class="m">Is post ka fact-check record nahi hai.</p>'}${ck && (ck.style || ck.debate) ? `<p class="m">Style guard: ${ck.style ? `${ck.style.score}/100${ck.style.penalty ? ` (${ck.style.penalty} points kate: ${esc((ck.style.notes || []).slice(0, 3).join('; '))})` : ''}` : 'n/a'}${ck.debate ? ` | Multi-AI debate: ${(ck.debate.stats && ck.debate.stats.verified) || 0} verified, ${(ck.debate.stats && ck.debate.stats.conflict) || 0} conflict claims` : ''}</p>` : ''}${qHtml}${staleHtml}<details${unc.length ? ' open' : ''}><summary>Kya confirm nahi hai (${unc.length})</summary>${uncHtml}</details>${ck && ck.source_check ? `<p class="m">Last source check: ${ck.source_check.okCount}/${ck.source_check.checked} live${(ck.source_check.dead || []).length ? ' | dead: ' + esc((ck.source_check.dead || []).join(', ')) : ''}</p>` : ''}</div></div>`;
+    const humanBlock = `<div class="card"><div class="p"><b>Human check + edit (ye step AI se nahi hota)</b>${r.human_edited_at ? `<p class="note">Human check darj: ${day(r.human_edited_at)} &middot; ${esc(r.human_edit_note || '')}</p>` : '<p class="note">Abhi tak koi insaan ne is draft ko check/edit nahi kiya. Neeche wala form bharo - iske bina normal approve nahi chalega.</p>'}
+<form method="post" action="${act}"><input type="hidden" name="a" value="human_approve">
+<label class="m">Poora article (yahan seedha edit karo; 200+ akshar ka change bhi gate pass karta hai)</label><textarea name="body" rows="14">${esc(r.body)}</textarea>
+<label class="m">Tumne kya check kiya / kya badla? (30+ akshar)</label><textarea name="note" rows="2" placeholder="Jaise: teen random facts sources se mile - tareekh, number, naam sahi hain. Ek line simple ki."></textarea>
+<label><input type="checkbox" name="claims_checked" value="1" required style="width:auto"> Maine 3 random facts article ke sources se mila liye</label>
+<label class="m">Publish kab?</label><select name="timing"><option value="now">Abhi</option><option value="random">Agli 1 ghante me random time</option></select>
+<button class="g">Human-check ke saath approve + publish</button></form>
+<p class="m">Sources dobara check karna ho to:</p><form method="post" action="${act}"><input type="hidden" name="a" value="source_recheck"><button class="o" style="width:auto;padding:4px 10px">Sources live hain?</button></form>
+<h3>Correction darj karo</h3>${corrections.length ? `<ul>${corrections.slice(0, 8).map((c) => `<li><b>${day(c.created_at)}:</b> ${esc(c.reason)}${c.new_text ? ` <span class="m">-> ${esc(c.new_text)}</span>` : ''}</li>`).join('')}</ul>` : '<p class="m">Koi correction nahi.</p>'}
+<form method="post" action="${act}"><input type="hidden" name="a" value="add_correction"><input name="old_text" placeholder="Kya galat tha (purana text)"><input name="new_text" placeholder="Sahi text (naya)"><input name="reason" placeholder="Reason (10+ akshar, public dikhega)" required><button class="o">Correction + dated update line jodo</button></form></div></div>`;
     const btnF = (a, label, c = '') => `<form method="post" action="${act}"><input type="hidden" name="a" value="${a}"><input type="hidden" name="force" value="1"><button class="${c}">${label}</button></form>`;
-    const approveBtns = vr.ok ? btn('approve_now', 'Approve + publish now', 'g') + btn('approve_random', 'Approve + publish at random time (within 1 hr)')
+    const approveBtns = vr.ok ? btn('approve_now', 'Approve + publish now (human check ke baad)', 'g') + btn('approve_random', 'Approve + publish at random time (within 1 hr)')
       : '<p class="note">Upar ki &#10060; galtiyan theek hone tak Approve band hai.</p>' + btnF('approve_now', 'Phir bhi approve + publish karo (meri zimmedari)', 'r');
     return A('Review', `<h1>${esc(r.title)}</h1><p><span class="tag">${esc(r.status)}</span> score: ${r.score ?? '-'} &middot; ${r.word_count || words(r.body)} words &middot; ${esc(r.category)}</p>${r.image_url ? (aiImg(r.image_url) ? thumb(r, true) : `<img src="${esc(r.image_url)}" style="max-width:100%">`) : ''}<p><i>${esc(r.summary)}</i></p>${renderBody(r.body).html}
 ${checkBlock}
+${humanBlock}
 ${mediaBlock}
 ${approveBtns}${btn('reject', 'Reject', 'r')}${btn('to_draft', 'Back to draft', 'o')}${btn('delete', 'Delete', 'r')}`);
   }
