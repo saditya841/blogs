@@ -44,7 +44,7 @@ TRENDS_GEO = "IN"
 BUSINESS_MODE = "true"
 BUSINESS_LANG = "en"
 BUSINESS_DAILY_LIMIT = "3"
-BUSINESS_MIN_WORDS = "900"
+BUSINESS_MIN_WORDS = "1200"
 BUSINESS_TOPIC_LIMIT = "3"
 
 # "AI drafts, human approves" safety rails (only used when auto_write is ON in admin).

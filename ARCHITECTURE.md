@@ -114,7 +114,8 @@ Aakhri update: 11 Nov 2026 | Code: `src/*.js` | DB: D1 `virall-db` | Deploy: Clo
 |---|---|---|
 | `src/index.js` | Public site, SEO pages, sitemap/RSS, admin UI + routes | D1 |
 | `src/trends.js` | Trends ×2 + News parallel, junk filter, business topic collection, research one topic | Yes (free, no AI) |
-| `src/business.js` | Business topic bank, 13 frameworks, operator prompt, depth gate, derived arithmetic | No |
+| `src/business.js` | Business topic bank, hot-traffic query list, 13 frameworks, operator prompt, depth gate, derived arithmetic | No |
+| `src/deepen.js` | Existing Business draft ka 0-token gap report + fresh-source deepening (write → re-fact-check → gate) | AI (manual) |
 | `src/autodraft.js` | Hourly auto-draft safety rails: approval-queue cap, auto-reject low-quality business drafts | No |
 | `src/preread.js` | 0-token reading brief: language, relevance, facts, allowed numbers, gaps | No |
 | `src/facts.js` | 2+ outlet agreed facts, date/number keys | No |
@@ -281,38 +282,54 @@ tab chalti hai jab env switch ON ho ya topic ke `research.mode === "business"` h
 
 `business.js` me ~48 evergreen, India-first queries ka `BUSINESS_TOPIC_BANK` hai (DMart, Zerodha, Amul,
 quick commerce, kirana economics, MSME cash flow, SaaS pricing, etc.). Har entry me `angle` + `framework`.
-`trends.js::collectBusinessTopics` ye do jagah se topics laata hai:
+Inme se 20 sabse zyada search-hone wale sawaal `BUSINESS_HOT_QUERIES` me alag list hain (DMart low-margin
+model, Zerodha revenue, dark-store economics, restaurant failure reasons, D2C CAC/LTV, UPI economics...).
 
-1. Google Business News RSS (fresh headlines),
-2. topic bank, din ke hisaab se rotate (same topic baar-baar nahi).
+`trends.js::collectBusinessTopics` teen jagah se topics laata hai, isi order me:
+
+1. **High-traffic evergreen queries** (`hotBusinessTopics`, din ke hisaab se rotate) — ek slot fresh news
+   ke liye bacha rehta hai. Har row par `heat: "high"` aur `why` set hota hai.
+2. Google Business News RSS (ek fresh headline).
+3. Topic bank ka baaki hissa, din ke hisaab se rotate (same topic baar-baar nahi).
 
 `BUSINESS_TOPIC_LIMIT` (3) + `DAILY_TOPIC_LIMIT` room ka rule lagta hai; `INSERT OR IGNORE` duplicate
 query ko rokta hai. Research me news providers ke saath **Wikipedia background** source judta hai
-(context ke liye; koi number isi se "verified" nahi hota).
+(context ke liye; koi number isi se "verified" nahi hota). Wikipedia-only source set reject hota hai.
 
 ### Writing contract
 
 `businessMessages()` AI ko operator ki tarah sochna sikhata hai (first principles, inversion, base rates,
-incentives, second-order effects, margin of safety, constraint). Required structure:
+incentives, second-order effects, margin of safety, constraint). Required structure (10 sections,
+1200–1600 words):
 
 ```
-## The setup  →  ## The money engine  →  ## Framework: <named>  →  ## The counterpoint
-→  ## Operator playbook  →  ## What could go wrong  →  ## What is not confirmed  →  ## Analysis
+## The setup (plain language, headline-only reader ke liye)
+→ ## The money engine
+→ ## Framework: <named>
+→ ## Worked example (sourced case, ya clearly labelled illustrative numbers)
+→ ## The counterpoint
+→ ## Operator playbook
+→ ## What could go wrong
+→ ## What the result shows (ya honest "result abhi known nahi")
+→ ## What is not confirmed
+→ ## Analysis
 ```
 
 Rules prompt me + code me:
 
 - har number/naam/date source ya code-checked ledger me hona chahiye,
 - calculation sirf `A / B = C` form me, inputs sourced aur arithmetic sahi,
-- estimate ko "estimate" likhna,
+- estimate ko "estimate" likhna, illustrative example ko fact nahi banana,
+- jargon pehli baar use karne se pehle ek line me explain karna,
 - guarantee / risk-free / get-rich / stock tip / target price / multibagger = **hard block**.
 
 ### Code gate (`businessGate`)
 
-0-token check: words (default 900, 80% hard floor), 6–8 headings, 3+ numbers, named framework,
-counterpoint, playbook, risks, honesty section, India context, generic-AI phrases. Score 100 se shuru,
-har missing layer par penalty; `guarantee` -30, `stock_tip` -25. `ok` ke liye score 70+, hard-fail nahi,
-words floor aur 5+ headings zaroori.
+0-token check: words (default 1200, 80% hard floor), 8–10 headings, 3+ numbers, named framework,
+worked example, result/outcome, counterpoint, playbook, risks, honesty section, plain-language setup,
+India context, generic-AI phrases. Score 100 se shuru, har missing layer par -7; `guarantee` -30,
+`stock_tip` -25. `ok` ke liye score 70+, hard-fail nahi, words floor, 7+ headings, aur **example +
+result dono** zaroori — sirf headings ka hona kaafi nahi.
 
 `derivedNumbers()` article ke `A / B = C` patterns ko sources ke numbers se match karta hai; sirf tab
 result allow hota hai jab inputs sources me hon aur arithmetic 2% tolerance ke andar sahi ho.
@@ -321,8 +338,9 @@ result allow hota hai jab inputs sources me hon aur arithmetic 2% tolerance ke a
 
 ```json
 {
-  "ok": true, "score": 86, "words": 1042, "headings": 8, "numbers": 7,
-  "framework": true, "counterpoint": true, "playbook": true, "risks": true,
+  "ok": true, "score": 86, "words": 1342, "headings": 10, "numbers": 9,
+  "framework": true, "example": true, "result": true, "plain": true,
+  "counterpoint": true, "playbook": true, "risks": true,
   "honesty": true, "india": true,
   "errors": [], "warnings": []
 }
@@ -332,9 +350,23 @@ Business posts `validate.js` me extra rules paate hain: guarantee/stock-tip erro
 hain; shallow depth warning hai (human fix kar sakta hai); `strict` auto-publish me depth fail block hai.
 Public article page par hamesha "Business analysis, not investment advice" box dikhta hai.
 
+### Existing post ko deepen karna (`deepen.js`)
+
+Purane/thin Business **draft** ko sudharne ke liye manual admin action:
+
+1. `gapReport(post)` — 0 token: words, headings, aur `check_json.business` ke flags dekhkar missing
+   detail list karta hai (framework, example, result, counterpoint, playbook, risks, honesty, India).
+2. `collectSources(title)` — wahi research providers se fresh sources.
+3. `businessMessages(..., existingBody)` — wahi story expand hoti hai, naya topic nahi banta.
+4. `factCheck` dobara chalta hai, phir `businessGate` + `copyCheck` + `ungroundedNumbers`.
+5. Sab pass ho to hi body save hoti hai; warna post chhoti rehti hai aur reason admin ko dikhta hai.
+
+Sirf `status='draft'` par chalta hai (live/approved post ko pehle "Back to draft" karna padta hai).
+Review page aur `/admin/business` dono par gap report + Deepen button dikhta hai.
+
 ### Limits
 
-- `BUSINESS_DAILY_LIMIT=3` (hard cap), `BUSINESS_MIN_WORDS=900`, `BUSINESS_TOPIC_LIMIT=3`.
+- `BUSINESS_DAILY_LIMIT=3` (hard cap), `BUSINESS_MIN_WORDS=1200`, `BUSINESS_TOPIC_LIMIT=3`.
 - `BUSINESS_LANG` default `en`; admin per draft EN ya HI chun sakta hai. Research language alag hoti hai.
 - Human approval abhi bhi mandatory hai. Auto-publish default me off (`SCORE_MAX=94 < 95`).
 
@@ -488,7 +520,7 @@ corrections(id, post_id, old_text, new_text, reason, created_at)
 | `BUSINESS_MODE` | `true` | Business pipeline on/off (false = news pipeline) |
 | `BUSINESS_LANG` | `en` | Default business output language (`en`/`hi`) |
 | `BUSINESS_DAILY_LIMIT` | `3` | Business mode ka hard daily draft cap |
-| `BUSINESS_MIN_WORDS` | `900` | Business article depth floor (80% hard fail) |
+| `BUSINESS_MIN_WORDS` | `1200` | Business article depth floor (80% hard fail) |
 | `BUSINESS_TOPIC_LIMIT` | `3` | Ek run me naye business topics |
 | `AUTO_DRAFT_QUEUE_MAX` | `6` | Auto-draft tabhi chalta hai jab isse kam drafts pending hon |
 | `AUTO_DRAFT_MIN_SCORE` | `60` | Isse neeche wale auto-draft ko khud reject kar do |
@@ -653,12 +685,14 @@ baaki tables `IF NOT EXISTS` hain.
 
 ## 16. Test coverage
 
-- `npm test` → **347 pass, 0 fail** (88 suites, 21 files)
-- `npm run check` → **31/31 modules load**
+- `npm test` → **354 pass, 0 fail** (89 suites, 22 files)
+- `npm run check` → **32/32 modules load**
 
 New tests: `claims`, `similarity`, `style`, `debate` (ledger, duplicate, human-style, safe roles,
 provider rotation, judge fallback, timeouts, no-source/less-roles failures), `quality-layers`
 (conflicts, originality, specificity, voice, fact registry, corrections, source liveness — in-memory
-SQLite D1 adapter se, koi network nahi), `business` (topic bank rotation, prompt structure,
-depth gate, guarantee/stock-tip block, derived arithmetic, business preflight, Business publish rules)
-aur `autodraft` (approval-queue cap, auto-reject on depth-gate/score fail, broken env values).
+SQLite D1 adapter se, koi network nahi), `business` (topic bank rotation, hot-topic bank sync,
+10-section prompt, depth gate, example/result requirement, guarantee/stock-tip block, derived
+arithmetic, business preflight, Business publish rules), `deepen` (0-token gap report for thin posts
+aur complete posts) aur `autodraft` (approval-queue cap, auto-reject on depth-gate/score fail,
+broken env values).
