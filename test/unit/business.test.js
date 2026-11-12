@@ -2,6 +2,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   BUSINESS_FRAMEWORKS,
+  BUSINESS_HOT_QUERIES,
   BUSINESS_ROLES,
   BUSINESS_TOPIC_BANK,
   businessAngle,
@@ -10,6 +11,7 @@ import {
   businessSeeds,
   derivedNumbers,
   frameworkFor,
+  hotBusinessTopics,
   isBusinessMode
 } from '../../src/business.js';
 import { classify, preflight, YMYL_STRICT } from '../../src/playbook.js';
@@ -28,9 +30,11 @@ const goodBusiness = (over = {}) => ({
     '## The setup', paragraph('DMart ne apna pehla store Maharashtra me khola aur aaj bhi wahi discipline chalati hai.'),
     '## The money engine', paragraph('Customer ka payment turant aata hai, supplier ka payment baad me hota hai, aur yahi cash cycle ka asli fayda hai.'),
     '## Framework: Unit Economics', paragraph('Unit economics ka matlab hai ek order par kitna contribution margin bachta hai aur CAC kab wapas aata hai.'),
+    '## Worked example', paragraph('Ek simple udaharan lete hain: 1200 crore revenue aur 300 store ka network, matlab 1200 / 300 = 4 crore per store ka rough average. Ye estimate hai, isliye ise estimate likhna zaroori hai.'),
     '## The counterpoint', paragraph('However, low margin ka matlab hai ki ek galat expansion plan poora business hilaa sakta hai.'),
     '## Operator playbook', paragraph('Playbook simple hai: pehle ek store par test karo, phir inventory turn check karo, phir hi doosra store kholo.'),
     '## What could go wrong', paragraph('Sabse bada risk hai rent aur staff cost badhna. Early signal hai ki footfall same rehkar basket size gir raha hai.'),
+    '## What the result shows', paragraph('Result ye hai ki 45 din ka inventory cycle aur 9 percent margin dono saath chal rahe hain. 1200 / 9 = 133 ka simple hisaab dikhata hai ki volume ka game hai.'),
     '## What is not confirmed', paragraph('Ye estimate hai kyunki company ke exact store-level numbers public nahi hain. Confirm nahi hai ki har city me same model chalega.'),
     '## Analysis', paragraph('Business model ki asli kahani margin nahi, cash cycle aur discipline hai. Ye India ke har retailer ke liye sabak hai.')
   ].join('\n\n'),
@@ -54,6 +58,21 @@ describe('business topic bank and helpers', () => {
     for (const [id, fw] of Object.entries(BUSINESS_FRAMEWORKS)) {
       assert.ok(fw.name && fw.idea && fw.ask, id);
     }
+  });
+
+  test('every hot-traffic query exists in the topic bank', () => {
+    assert.ok(BUSINESS_HOT_QUERIES.length >= 15);
+    const bank = new Set(BUSINESS_TOPIC_BANK.map((x) => x.q.toLowerCase()));
+    for (const q of BUSINESS_HOT_QUERIES) assert.ok(bank.has(q.toLowerCase()), q);
+    assert.equal(new Set(BUSINESS_HOT_QUERIES.map((q) => q.toLowerCase())).size, BUSINESS_HOT_QUERIES.length);
+  });
+
+  test('hot topics rotate by day and keep angle/framework', () => {
+    const a = hotBusinessTopics({ limit: 3, offset: 0 });
+    const b = hotBusinessTopics({ limit: 3, offset: 3 });
+    assert.equal(a.length, 3);
+    assert.notEqual(a[0].q, b[0].q);
+    for (const t of a) assert.ok(t.angle && t.framework);
   });
 
   test('businessSeeds rotates without repeating', () => {
@@ -99,13 +118,28 @@ describe('business prompt', () => {
     assert.match(user.content, /FRAMEWORK TO APPLY: Unit Economics/);
     assert.match(user.content, /## The counterpoint/);
     assert.match(user.content, /## Operator playbook/);
+    assert.match(user.content, /## Worked example/);
+    assert.match(user.content, /## What the result shows/);
     assert.match(user.content, /## What is not confirmed/);
+    assert.match(user.content, /plain language/i);
     assert.match(all, /1200 crore/);
   });
 
   test('Hindi mode asks for Devanagari output', () => {
     const messages = businessMessages({}, { topic: { query: 'kirana store economics India margin' }, lang: 'hi' });
     assert.match(messages[1].content, /LANGUAGE: Hindi \(Devanagari script\)/);
+  });
+
+  test('an existing article is sent as a draft to deepen, not as a fact source', () => {
+    const messages = businessMessages({}, {
+      topic: { query: 'DMart business model low margin high volume' },
+      lang: 'en',
+      existingBody: '## The setup\n\nPurana draft jo expand karna hai.',
+      sources: [{ title: 'DMart annual report', url: 'https://example.com/a', text: 'Revenue was 1200 crore.' }]
+    });
+    assert.match(messages[0].content, /EXISTING ARTICLE/i);
+    assert.match(messages[1].content, /EXISTING ARTICLE TO DEEPEN/);
+    assert.match(messages[1].content, /Purana draft/);
   });
 });
 
@@ -114,6 +148,8 @@ describe('businessGate — code decides if it is a real business article', () =>
     const g = businessGate(goodBusiness(), { minWords: 900 });
     assert.equal(g.ok, true, JSON.stringify(g.warnings));
     assert.equal(g.hasFramework, true);
+    assert.equal(g.hasExample, true);
+    assert.equal(g.hasResult, true);
     assert.equal(g.hasCounter, true);
     assert.equal(g.hasPlaybook, true);
     assert.equal(g.hasRisks, true);
@@ -121,6 +157,18 @@ describe('businessGate — code decides if it is a real business article', () =>
     assert.equal(g.hasIndia, true);
     assert.ok(g.numbers >= 3);
     assert.ok(g.score >= 70);
+  });
+
+  test('missing worked example or result blocks the gate even when words are fine', () => {
+    const noExample = goodBusiness({ body: goodBusiness().body.replace('## Worked example', '## More context') });
+    const g1 = businessGate(noExample, { minWords: 900 });
+    assert.equal(g1.ok, false);
+    assert.equal(g1.hasExample, false);
+
+    const noResult = goodBusiness({ body: goodBusiness().body.replace('## What the result shows', '## Final note') });
+    const g2 = businessGate(noResult, { minWords: 900 });
+    assert.equal(g2.ok, false);
+    assert.equal(g2.hasResult, false);
   });
 
   test('guarantee / get-rich language is a hard fail', () => {
