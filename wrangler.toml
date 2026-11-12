@@ -46,6 +46,12 @@ BUSINESS_LANG = "en"
 BUSINESS_DAILY_LIMIT = "3"
 BUSINESS_MIN_WORDS = "1200"
 BUSINESS_TOPIC_LIMIT = "3"
+# Auto-heal topic cleanup: keep a 3-4 day writing buffer, prune the rest.
+TOPIC_READY_MAX = "12"
+TOPIC_THIN_DAYS = "7"
+TOPIC_READY_DAYS = "14"
+TOPIC_DRAFTED_DAYS = "30"
+TOPIC_OTHER_MODE_DAYS = "7"
 
 # "AI drafts, human approves" safety rails (only used when auto_write is ON in admin).
 # Hourly cron already exists; these stop a 24-drafts/day content farm and keep the review queue small.

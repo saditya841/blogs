@@ -154,6 +154,11 @@ koi key nahi chahiye. Sirf `PEXELS_API_KEY` / `YOUTUBE_API_KEY` na hone se photo
 | `BUSINESS_DAILY_LIMIT` | `3` | Business mode ka hard daily draft cap. Isse zyada draft ek din me nahi bante. |
 | `BUSINESS_MIN_WORDS` | `1200` | Business article ki minimum depth (words). Gate 80% se neeche hard-fail karta hai. |
 | `BUSINESS_TOPIC_LIMIT` | `3` | Ek run me kitne naye business topics laane hain. |
+| `TOPIC_READY_MAX` | `12` | Auto-heal cleanup ready backlog ka cap (3-4 din ka writing buffer). |
+| `TOPIC_THIN_DAYS` | `7` | Itne din purane thin/rejected topics delete. |
+| `TOPIC_READY_DAYS` | `14` | Itne din purane ready topics delete (sources stale hote hain). |
+| `TOPIC_DRAFTED_DAYS` | `30` | Drafted topics ka history window. |
+| `TOPIC_OTHER_MODE_DAYS` | `7` | Business mode ON me purane news topics (aur vice versa) delete. |
 | `AUTO_DRAFT_QUEUE_MAX` | `6` | Auto-draft sirf tab chalta hai jab approve karne ke liye itne se kam drafts pending hon. |
 | `AUTO_DRAFT_MIN_SCORE` | `60` | Auto-draft is score se neeche wale business draft ko khud reject kar deta hai. |
 | `DAILY_TOPIC_LIMIT` | `10` | Roz max naye topics. |
@@ -306,6 +311,10 @@ writer: business prompt — 10 sections (plain-language setup, money engine, nam
         ▼
 admin review (EN/HI available; gap report + Deepen for drafts)
         → human edit + approve → live
+
+auto-heal agent /admin/autoheal (0 token): topic cleanup (preview → confirm),
+        duplicate/old-mode pruning, ready buffer top 12, missing summary/tags/meta
+        manual (token): 1 thin Business draft deepen per click
 ```
 
 **News mode (`BUSINESS_MODE=false`):**
@@ -362,12 +371,13 @@ Safety rules jo code me already hain:
 npm test
 ```
 
-354 tests in 22 files (`preread`, `validate`, `writer`, `editor`, `playbook`, `verify`, `facts`, `cardpost`, `media`,
-`trends`, `ai`, `api-manager`, `seo-optimizer`, `index`, `claims`, `similarity`, `style`, `debate`, `quality-layers`, `business`, `autodraft`, `deepen`). Sab pure functions / fake KV / fake fetch -
+364 tests in 23 files (`preread`, `validate`, `writer`, `editor`, `playbook`, `verify`, `facts`, `cardpost`, `media`,
+`trends`, `ai`, `api-manager`, `seo-optimizer`, `index`, `claims`, `similarity`, `style`, `debate`, `quality-layers`, `business`, `autodraft`, `deepen`, `autoheal`). Sab pure functions / fake KV / fake fetch -
 koi network call nahi, koi real DB nahi. `quality-layers` conflicts, originality, specificity, voice, fact
 registry, corrections aur source liveness ko cover karta hai (in-memory SQLite se, network nahi).
 `business` topic bank, hot-topic rotation, frameworks, 10-section prompt, depth gate, derived arithmetic aur
 Business publish rules cover karta hai. `deepen` existing post ka 0-token gap report cover karta hai.
+`autoheal` topic cleanup plan, duplicate normalisation aur metadata repair ko cover karta hai.
 `autodraft` approval-queue cap aur auto-reject rules cover karta hai.
 `npm run check` har module import karke toota hua import/syntax pakadta hai.
 

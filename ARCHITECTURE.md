@@ -116,6 +116,7 @@ Aakhri update: 11 Nov 2026 | Code: `src/*.js` | DB: D1 `virall-db` | Deploy: Clo
 | `src/trends.js` | Trends ×2 + News parallel, junk filter, business topic collection, research one topic | Yes (free, no AI) |
 | `src/business.js` | Business topic bank, hot-traffic query list, 13 frameworks, operator prompt, depth gate, derived arithmetic | No |
 | `src/deepen.js` | Existing Business draft ka 0-token gap report + fresh-source deepening (write → re-fact-check → gate) | AI (manual) |
+| `src/autoheal.js` | Topic cleanup planner, duplicate pruning, metadata repair, opt-in draft healing, agent run log | DB + AI (manual) |
 | `src/autodraft.js` | Hourly auto-draft safety rails: approval-queue cap, auto-reject low-quality business drafts | No |
 | `src/preread.js` | 0-token reading brief: language, relevance, facts, allowed numbers, gaps | No |
 | `src/facts.js` | 2+ outlet agreed facts, date/number keys | No |
@@ -364,6 +365,32 @@ Purane/thin Business **draft** ko sudharne ke liye manual admin action:
 Sirf `status='draft'` par chalta hai (live/approved post ko pehle "Back to draft" karna padta hai).
 Review page aur `/admin/business` dono par gap report + Deepen button dikhta hai.
 
+### Auto-heal agent (`autoheal.js`, `/admin/autoheal`)
+
+Content/data maintenance, **not** code deployment. Teen parts hain:
+
+**A. 0-token topic cleanup**
+- `topicCleanupPlan(rows)` pure planner hai: duplicate query (case/punctuation ignore), purane
+  `thin`/`rejected`/`duplicate` (7 din), stale `ready` (14 din ke sources), 30 din purane `drafted`,
+  aur business mode me purane news topics (7 din) delete karta hai.
+- `ready` backlog top 12 par cap hota hai (HIGH TRAFFIC heat pehle, phir source count, phir freshness).
+  Research 0-token hai, isliye 100+ ready topics rakhna zaroori nahi.
+- Admin pehle preview dekhta hai, phir "Cleanup confirm" dabata hai. Sirf `topics` table badalti hai —
+  posts/live articles ko kuch nahi hota.
+- Cron roz 03:30 IST (22:00 UTC) par ek baar cleanup chalata hai, `settings.last_cleanup_day` se
+  duplicate run rokta hai.
+
+**B. Metadata repair (0 token)**
+- `deriveSummary(body)`, `deriveTags(title, summary, category)` se khaali `summary`/`tags`/`meta_description`
+  bharte hain. Human-written fields overwrite nahi hote. Live body untouched.
+
+**C. Draft healing (manual, AI token)**
+- `healDrafts(env, { limit: 1 })` thin Business drafts ko gap count ke hisaab se sort karke `deepenOne`
+  chalata hai. Ek click = ek draft, taaki token control rahe. Fail par purana draft waisa hi rehta hai.
+
+Har action `agent_runs` table me log hota hai (lazily create hoti hai), aur `/admin/autoheal` par
+last 8 runs ka before/after dikhta hai. Ye agent **publish nahi karta** — human gate intact hai.
+
 ### Limits
 
 - `BUSINESS_DAILY_LIMIT=3` (hard cap), `BUSINESS_MIN_WORDS=1200`, `BUSINESS_TOPIC_LIMIT=3`.
@@ -522,6 +549,11 @@ corrections(id, post_id, old_text, new_text, reason, created_at)
 | `BUSINESS_DAILY_LIMIT` | `3` | Business mode ka hard daily draft cap |
 | `BUSINESS_MIN_WORDS` | `1200` | Business article depth floor (80% hard fail) |
 | `BUSINESS_TOPIC_LIMIT` | `3` | Ek run me naye business topics |
+| `TOPIC_READY_MAX` | `12` | Auto-heal ready backlog cap |
+| `TOPIC_THIN_DAYS` | `7` | Purane thin/rejected topics delete |
+| `TOPIC_READY_DAYS` | `14` | Purane ready topics delete |
+| `TOPIC_DRAFTED_DAYS` | `30` | Drafted topics history |
+| `TOPIC_OTHER_MODE_DAYS` | `7` | Opposite-mode purane topics delete |
 | `AUTO_DRAFT_QUEUE_MAX` | `6` | Auto-draft tabhi chalta hai jab isse kam drafts pending hon |
 | `AUTO_DRAFT_MIN_SCORE` | `60` | Isse neeche wale auto-draft ko khud reject kar do |
 | `SCORE_MAX` | `94` | Auto-publish cap (95 se neeche) |
@@ -685,8 +717,8 @@ baaki tables `IF NOT EXISTS` hain.
 
 ## 16. Test coverage
 
-- `npm test` → **354 pass, 0 fail** (89 suites, 22 files)
-- `npm run check` → **32/32 modules load**
+- `npm test` → **364 pass, 0 fail** (91 suites, 23 files)
+- `npm run check` → **33/33 modules load**
 
 New tests: `claims`, `similarity`, `style`, `debate` (ledger, duplicate, human-style, safe roles,
 provider rotation, judge fallback, timeouts, no-source/less-roles failures), `quality-layers`
@@ -694,5 +726,6 @@ provider rotation, judge fallback, timeouts, no-source/less-roles failures), `qu
 SQLite D1 adapter se, koi network nahi), `business` (topic bank rotation, hot-topic bank sync,
 10-section prompt, depth gate, example/result requirement, guarantee/stock-tip block, derived
 arithmetic, business preflight, Business publish rules), `deepen` (0-token gap report for thin posts
-aur complete posts) aur `autodraft` (approval-queue cap, auto-reject on depth-gate/score fail,
+aur complete posts), `autoheal` (topic cleanup plan, duplicate normalisation, age/mode pruning, metadata
+repair) aur `autodraft` (approval-queue cap, auto-reject on depth-gate/score fail,
 broken env values).
