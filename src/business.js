@@ -293,11 +293,14 @@ export function businessMessages(env, opts = {}) {
     ? `CODE-CHECKED CLAIM LEDGER (only these facts are verified; use them as the spine):\n${String(opts.ledgerBlock).slice(0, 2600)}\n\n`
     : '';
   const today = new Date(Date.now() + 19800 * 1000).toISOString().slice(0, 10);
+  const existing = String(opts.existingBody || '').slice(0, 14000);
 
   const system =
     'You are a business writer for an Indian business publication. You have run a small business and analysed companies for 15 years. ' +
     'You write like an experienced operator explaining a hard idea to a smart friend: concrete, calm, specific, and honest about what you do not know. ' +
-    'You are not a motivational speaker, a consultant, or a chatbot. No hype. No fake quotes. No guarantees.\n\n' +
+    'You are not a motivational speaker, a consultant, or a chatbot. No hype. No fake quotes. No guarantees.\n' +
+    (existing ? 'When an EXISTING ARTICLE is provided, treat it as a draft to improve, not as a source of facts. Keep what is correct, remove filler, and every fact still needs SOURCE support.\n' : '') +
+    '\n' +
     'THINK BEFORE YOU WRITE (do this silently, do not print your thinking):\n' +
     BUSINESS_THINKING.map(([name, how], i) => `${i + 1}. ${name}: ${how}`).join('\n') + '\n\n' +
     'HARD RULES:\n' +
@@ -325,6 +328,7 @@ export function businessMessages(env, opts = {}) {
 
   const user =
     `DATE: ${today}\nTOPIC: ${topic}\nANGLE: ${angle}\nFRAMEWORK TO APPLY: ${fw.name}\nFRAMEWORK IDEA: ${fw.idea}\nASK YOURSELF: ${fw.ask}\nLANGUAGE: ${LANG}\n\n` +
+    (existing ? `EXISTING ARTICLE TO DEEPEN (same story; keep correct facts, remove filler, explain jargon, add a worked example and a result section):\n${existing}\n\n` : '') +
     `${briefBlock}${ledgerBlock}SOURCES:\n${srcBlock}\n\n` +
     `Write a deep business article in ${LANG}. It must read like a real publication, not a listicle and not a press release.\n\n` +
     'STRUCTURE (use these headings, exactly as lines starting with ##):\n' +
@@ -375,7 +379,7 @@ export function businessGate(article = {}, opts = {}) {
   const body = String(article.body || '');
   const full = `${article.title || ''}\n${article.summary || ''}\n${body}`;
   const words = countWords(body);
-  const minWords = Math.max(300, Number(opts.minWords) || 900);
+  const minWords = Math.max(300, Number(opts.minWords) || 1200);
   const headings = headingsOf(body);
   const nums = [...new Set(numbersIn(full))].filter((n) => n.length >= 2 || n.includes('.'));
   const checks = {
@@ -417,11 +421,13 @@ export function businessGate(article = {}, opts = {}) {
   if (!checks.hasPlaybook) W('playbook', 'Operator playbook / action steps nahi mile');
   if (!checks.hasRisks) W('risks', 'Risks / failure modes section nahi mila');
   if (!checks.hasHonesty) W('honesty', '"What is not confirmed" / estimate label nahi mila');
+  if (!checks.hasPlain) W('plain', 'Plain-language setup nahi mila — headline-only reader ko context chahiye');
+  if (!checks.hasAnalysis) W('analysis', 'Final Analysis section nahi mila');
   if (!checks.hasIndia) W('india', 'India context (₹/crore/Indian city) nahi dikha');
   if (checks.genericHits.length) W('generic', `Generic AI phrases mile: ${checks.genericHits.join(', ')}`);
 
   let score = 100;
-  for (const code of ['short', 'sections', 'sections_few', 'numbers', 'framework', 'example', 'result', 'counter', 'playbook', 'risks', 'honesty', 'india', 'generic']) {
+  for (const code of ['short', 'sections', 'sections_few', 'numbers', 'framework', 'example', 'result', 'counter', 'playbook', 'risks', 'honesty', 'plain', 'analysis', 'india', 'generic']) {
     if (errors.some((e) => e.code === code)) score -= 0;
     else if (warnings.some((w) => w.code === code || (code === 'short' && w.code === 'short_warn'))) score -= 7;
   }

@@ -49,7 +49,7 @@ export function validatePost(p, o = {}) {
   // Missing depth sections are warnings so a human can fix and publish, but auto-publish stays blocked.
   let bg = null;
   if (p.category === 'Business') {
-    bg = businessGate({ title, summary, body }, { minWords: Number(o.businessMinWords) || 900 });
+    bg = businessGate({ title, summary, body }, { minWords: Number(o.businessMinWords) || 1200 });
     if (bg.guaranteeHits && bg.guaranteeHits.length) E('business_guarantee', `Guarantee/get-rich language: ${bg.guaranteeHits.join(', ')}`);
     if (bg.stockTipHits && bg.stockTipHits.length) E('business_stock_tip', `Stock tip language: ${bg.stockTipHits.join(', ')}`);
     if (!bg.ok) W('business_quality', `Business depth gate ${bg.score}/100: ${(bg.warnings || []).slice(0, 3).map((x) => x.msg).join('; ') || 'sections/numbers kam hain'}`);

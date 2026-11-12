@@ -248,7 +248,7 @@ export async function writeOne(env, opts = {}) {
   const lang = opts.lang === 'hi' ? 'hi' : opts.lang === 'en' ? 'en' : (research.lang === 'hi' ? 'hi' : research.lang === 'en' ? 'en' : (business ? String(env.BUSINESS_LANG || 'en') : langOf(env)));
   const angle = business ? businessAngle(topic.query, research) : '';
   const fwId = business ? frameworkFor(topic.query, research) : '';
-  const minWords = business ? Math.max(600, Number(env.BUSINESS_MIN_WORDS || 900)) : 450;
+  const minWords = business ? Math.max(600, Number(env.BUSINESS_MIN_WORDS || 1200)) : 450;
 
   // ---- 2c. duplicate check (ZERO token) ----
   // Same story / same headline pehle se site par hai? Topic ko 'duplicate' mark karo aur AI token
@@ -635,7 +635,7 @@ export async function writeOne(env, opts = {}) {
     specificityScore: spec.score,
     voiceScore: voice.score,
     unconfirmed: unconfirmedFinal.length,
-    business: business ? { ok: !!businessResult?.ok, score: businessResult?.score || 0, angle, framework: fwId, errors: (businessResult?.errors || []).map((e) => e.msg) } : null,
+    business: business ? { ok: !!businessResult?.ok, score: businessResult?.score || 0, angle, framework: fwId, example: !!businessResult?.hasExample, result: !!businessResult?.hasResult, errors: (businessResult?.errors || []).map((e) => e.msg) } : null,
     businessScore: businessResult ? businessResult.score : null,
     businessOk: businessResult ? !!businessResult.ok : null,
     lang,

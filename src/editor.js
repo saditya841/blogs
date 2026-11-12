@@ -22,7 +22,7 @@ const countWords = (s) => String(s || '').split(/\s+/).filter(Boolean).length;
 
 // Hindi heading is Devanagari on purpose: Latin heading words would otherwise look like invented names.
 // Business mode uses its own section names; all of them count as "original value" sections.
-const ANALYSIS_RE = /^##\s*(?:विश्लेषण|analysis|vishleshan|virall take|iska matlab|isaka matlab|why it matters|bottom line|निचोड़|framework|what is not confirmed|what could go wrong|operator playbook|the money engine)\s*$/im;
+const ANALYSIS_RE = /^##\s*(?:विश्लेषण|analysis|vishleshan|virall take|iska matlab|isaka matlab|why it matters|bottom line|निचोड़|framework|the setup|the money engine|worked example|the counterpoint|operator playbook|what could go wrong|what the result shows|what is not confirmed)\s*$/im;
 
 export const hasAnalysisSection = (body) => ANALYSIS_RE.test(String(body || ''));
 
@@ -119,9 +119,12 @@ export function businessEditorMessages(env, article, sources, feedback = '', opt
     `TITLE: ${article.title || ''}\nSUMMARY: ${article.summary || ''}\n\nDRAFT BODY:\n${article.body || ''}\n\n` +
     `SOURCES:\n${srcBlock}\n\n` +
     'Task 1 - EDIT the draft:\n' +
-    `- Keep it ${langName}, 900 to 1300 words, 6 to 8 sub-headings written as lines starting with ##\n` +
-    '- The article must keep these sections: a specific setup, the money engine, a named framework applied to the case, ' +
-    'the strongest counterpoint, an operator playbook, what could go wrong, what is not confirmed, and a final ## Analysis section.\n' +
+    `- Keep it ${langName}, 1200 to 1600 words, 8 to 10 sub-headings written as lines starting with ##\n` +
+    '- The article must keep these sections: a plain-language setup (assume the reader only saw a headline), the money engine, ' +
+    'a named framework applied to the case, one worked example, the strongest counterpoint, an operator playbook, what could go wrong, ' +
+    'what the result shows, what is not confirmed, and a final ## Analysis section.\n' +
+    '- Explain every technical term in one line before using it. The reader is smart but may be new to business analysis.\n' +
+    '- The worked example may be a real sourced case or clearly labelled illustrative numbers. Never present illustrative assumptions as facts.\n' +
     '- Remove anything the sources do not support. Do not guess or fill gaps. If a detail is missing, say it is not confirmed.\n' +
     '- Keep every sourced number. If a number is an estimate, write "estimate" next to it and show the sourced inputs.\n' +
     '- No markdown bold, no bullet lists in the body, no quotation marks. Headings only as lines starting with ##.\n' +
@@ -129,7 +132,7 @@ export function businessEditorMessages(env, article, sources, feedback = '', opt
     'Task 2 - LIST THE FACTS:\n' +
     '- Write one line for every factual claim in the final article:\n' +
     '  CLAIM: <short claim from the article> || EVIDENCE: <exact words copied from a source that prove it>\n' +
-    '- List 8 to 12 claims. If a sentence has no exact evidence, remove that sentence from the article instead of listing it.\n' +
+    '- List 8 to 14 claims. If a sentence has no exact evidence, remove that sentence from the article instead of listing it.\n' +
     '- Do NOT list a calculation as a claim. List the sourced inputs used in the calculation instead.\n' +
     '- The EVIDENCE must be an exact phrase from the SOURCES (not your paraphrase).\n\n' +
     'Return EXACTLY this format:\n' +
@@ -169,7 +172,7 @@ export function evaluateEditorOutput(text, article, sources, opts = {}) {
   const nums = numbersNotIn(checkText, notes, allow);
   const names = latinNotIn(checkText, notes, lang);
   const expected = opts.business
-    ? Math.max(6, Math.min(12, Math.floor(sentenceCount(`${current.title}\n${current.summary}\n${current.body}`) / 5)))
+    ? Math.max(8, Math.min(14, Math.floor(sentenceCount(`${current.title}\n${current.summary}\n${current.body}`) / 5)))
     : expectedClaimCount(current);
   const unsupported = claims.filter((c) => !c.ok);
   const coverageLow = claims.length < expected;

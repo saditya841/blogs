@@ -14,6 +14,8 @@ import { addCorrection, correctionsForPost, recentCorrections, correctionLine } 
 import { staleFacts, markPostFactsVerified } from './factregistry.js';
 import { recheckSources } from './sourcecheck.js';
 import { autoDraftQueue, autoDraftKeep } from './autodraft.js';
+import { deepenOne, gapReport } from './deepen.js';
+import { cleanupPreview, cleanupTopics, fixPostBasics, healDrafts, recentAgentRuns } from './autoheal.js';
 
 const now = () => Math.floor(Date.now() / 1000);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -112,6 +114,15 @@ const changedChars = (a, b) => {
   return Math.round((1 - same / base) * Math.max(String(a || '').length, String(b || '').length));
 };
 const humanEditRequired = (env) => !['false', '0', 'off', 'no'].includes(String(env.REQUIRE_HUMAN_EDIT ?? 'true').trim().toLowerCase());
+// Auto-heal topic cleanup knobs. Defaults keep a 3-4 day writing buffer, not a 100-topic museum.
+const cleanupOpts = (env) => ({
+  businessMode: isBusinessMode(env),
+  readyMax: Number(env.TOPIC_READY_MAX || 12),
+  thinDays: Number(env.TOPIC_THIN_DAYS || 7),
+  readyDays: Number(env.TOPIC_READY_DAYS || 14),
+  draftedDays: Number(env.TOPIC_DRAFTED_DAYS || 30),
+  otherModeDays: Number(env.TOPIC_OTHER_MODE_DAYS || 7)
+});
 const dec = (s) => { try { return decodeURIComponent(s); } catch { return null; } }; // broken %-encoding must be a 404, not a crash
 const pageOf = (url) => Math.max(1, Math.floor(Number(url.searchParams.get('page'))) || 1);
 const okImg = (u) => (String(u || '').startsWith('https://') ? u : null);
@@ -292,6 +303,15 @@ export default {
   async scheduled(event, env, ctx) {
     ctx.waitUntil((async () => {
       await autoApprove(env); await pingIndexNow(env);
+      // 0-token topic cleanup once per IST day (22:00 UTC = 03:30 IST). Never deletes a post.
+      try {
+        const todayIST = new Date(Date.now() + 19800 * 1000).toISOString().slice(0, 10);
+        if (new Date().getUTCHours() >= 22 && (await getSetting(env, 'last_cleanup_day', '')) !== todayIST) {
+          const cr = await cleanupTopics(env, cleanupOpts(env));
+          await setSetting(env, 'last_cleanup_day', todayIST);
+          await setSetting(env, 'last_cleanup', JSON.stringify({ at: now(), ...cr }));
+        }
+      } catch (e) { console.log('cleanup', e.message); }
       try {
         if (isBusinessMode(env)) await collectBusinessTopics(env);
         else await collectTopics(env);
@@ -649,7 +669,7 @@ async function admin(req, env, p, url) {
     const lang = String(env.BUSINESS_LANG || 'en').toLowerCase() === 'hi' ? 'hi' : 'en';
     const rows = results.map((r) => {
       let d = {}; try { d = JSON.parse(r.research || '{}'); } catch {}
-      const meta = [d.framework ? `framework: ${d.framework}` : '', d.angle ? `angle: ${d.angle}` : '', `sources: ${r.source_count || 0}`].filter(Boolean).join(' · ');
+      const meta = [d.heat === 'high' ? 'HIGH TRAFFIC' : d.heat === 'fresh' ? 'fresh news' : '', d.framework ? `framework: ${d.framework}` : '', d.angle ? `angle: ${d.angle}` : '', `sources: ${r.source_count || 0}`].filter(Boolean).join(' · ');
       const write = r.status === 'ready'
         ? `<form method="post" action="/admin/business/write" style="display:inline"><input type="hidden" name="topicId" value="${r.id}"><input type="hidden" name="lang" value="en"><button class="g">Write English</button></form>
            <form method="post" action="/admin/business/write" style="display:inline"><input type="hidden" name="topicId" value="${r.id}"><input type="hidden" name="lang" value="hi"><button class="g">Write Hindi</button></form>`
@@ -657,16 +677,95 @@ async function admin(req, env, p, url) {
       return `<div class="card"><div class="p"><a href="/admin/topic/${r.id}"><b>${esc(r.query)}</b></a><div class="m"><span class="tag">${esc(r.status)}</span> ${esc(meta)}</div><div style="margin-top:6px">${write}</div></div></div>`;
     }).join('');
     const counts = Object.entries(cnt).map(([k, v]) => `${esc(k)}: ${v}`).join(' &middot; ') || 'koi business topic nahi';
-    return A('Business', `<h1>Business content</h1>
+    // Existing Business posts: find thin drafts and offer one-click "deepen" (fresh sources + example + result).
+    const { results: bposts } = await env.DB.prepare("SELECT id,title,status,word_count,score,check_json,body,category FROM posts WHERE category='Business' ORDER BY id DESC LIMIT 30").all();
+    const gaps = bposts.map((x) => gapReport(x)).filter((g) => g.needed);
+    const gapRows = gaps.slice(0, 15).map((g) => `<div class="card"><div class="p"><a href="/admin/post/${g.postId}"><b>${esc(g.title)}</b></a><div class="m"><span class="tag">${esc(g.status)}</span> ${g.words} shabd &middot; ${g.headings} sections &middot; score ${g.score || '-'}</div><ul>${g.gaps.slice(0, 5).map((x) => `<li>${esc(x.msg)}</li>`).join('')}</ul>${g.status === 'draft' ? `<form method="post" action="/admin/post/${g.postId}/deepen"><button class="g">Deepen: detail + example + result (AI)</button></form>` : `<p class="m">Live/approved post — pehle "Back to draft" karke deepen karo.</p>`}</div></div>`).join('');
+    const gapBlock = `<h2>Content gap analysis (existing Business posts)</h2><p class="m">${bposts.length} Business posts check kiye, ${gaps.length} me detail ki kami mili. Sirf drafts yahan se deepen ho sakte hain; publish phir bhi human approval se hoga.</p>${gapRows || '<p class="m">Koi detail gap nahi mila — sab posts structure complete hain.</p>'}`;
+    return A('Business', `<p><a href="/admin/topics">Topics</a> | <a href="/admin/autoheal">Auto-heal</a> | <a href="/admin">Admin</a></p><h1>Business content</h1>
 ${msg ? `<p class="note">${esc(msg)}</p>` : ''}
 <p class="m">Aaj ke drafts: ${made}/${cap} &middot; default language: ${lang} &middot; ${counts}</p>
-<p class="note">Business mode news se alag hai: research Wikipedia + news se hota hai, article me framework, unit economics, counterpoint, operator playbook aur "kya confirm nahi hai" section code se check hote hain. Stock tips aur guaranteed-return language hard-block hai. Publish se pehle human approval zaroori hai.</p>
+<p class="note">Business mode news se alag hai: research Wikipedia + news se hota hai, article me plain-language setup, framework, unit economics, worked example, counterpoint, operator playbook, result, risks aur "kya confirm nahi hai" section code se check hote hain. Stock tips aur guaranteed-return language hard-block hai. Publish se pehle human approval zaroori hai.</p>
 <form method="post" action="/admin/business/collect"><button>Naye business topics lao (0 token)</button></form>
 <form method="post" action="/admin/business/write"><input type="hidden" name="lang" value="en"><button class="g">Ek English business draft likho (token, 2-3 min)</button></form>
 <form method="post" action="/admin/business/write"><input type="hidden" name="lang" value="hi"><button class="g">Ek Hindi business draft likho (token, 2-3 min)</button></form>
 <p class="m"><a href="/admin/topics">Topics page</a> par pending business topic ka research chalao, phir yahan "Write" dabao. Auto-draft OFF rakho jab tak quality trust na ho.</p>
-${rows || '<p>Abhi koi business topic nahi. Upar "Naye business topics lao" dabao.</p>'}`);
+${rows || '<p>Abhi koi business topic nahi. Upar "Naye business topics lao" dabao.</p>'}
+${gapBlock}`);
   }
+  // ---- Auto-heal agent: 0-token cleanup + metadata repair, opt-in draft deepening ----
+  if (p === '/admin/autoheal' && req.method === 'GET') {
+    const msg = url.searchParams.get('msg');
+    const preview = await cleanupPreview(env, cleanupOpts(env));
+    const topicCnt = (await env.DB.prepare('SELECT status, COUNT(*) c FROM topics GROUP BY status').all()).results || [];
+    const postCnt = (await env.DB.prepare('SELECT status, COUNT(*) c FROM posts GROUP BY status').all()).results || [];
+    const missingMeta = (await env.DB.prepare("SELECT COUNT(*) c FROM posts WHERE summary IS NULL OR summary='' OR tags IS NULL OR tags='' OR meta_description IS NULL OR meta_description=''").first()).c;
+    const missingImg = (await env.DB.prepare("SELECT COUNT(*) c FROM posts WHERE image_url IS NULL OR image_url=''").first()).c;
+    const bizDrafts = (await env.DB.prepare("SELECT COUNT(*) c FROM posts WHERE category='Business' AND status='draft'").first()).c;
+    let last = null; try { last = JSON.parse(await getSetting(env, 'last_cleanup', '')); } catch {}
+    const runs = await recentAgentRuns(env, 8);
+    const cntLine = (rows) => rows.map((x) => `${esc(x.status)}: ${x.c}`).join(' &middot; ') || 'koi nahi';
+    const reasonLabel = {
+      duplicate_query: 'Duplicate query', old_news_topic: 'Business mode me purana news topic',
+      old_business_topic: 'News mode me purana business topic', stale_thin: 'Purana thin topic',
+      stale_rejected: 'Purana rejected topic', stale_duplicate: 'Purana duplicate topic',
+      stale_ready: 'Stale ready topic (sources purane)', ready_over_cap: 'Ready backlog cap (top 12 ke baad)',
+      old_drafted: '30 din se purana drafted topic', stale_other: 'Purana topic'
+    };
+    const previewRows = preview.plan.deletions.slice(0, 25).map((d) =>
+      `<li><b>${esc(d.query || '(query khali)')}</b> <span class="m">[${esc(d.status)}]</span> — ${esc(reasonLabel[d.reason] || d.reason)}</li>`
+    ).join('');
+    const runRows = runs.map((r) => {
+      let d = {}; try { d = JSON.parse(r.result || '{}'); } catch {}
+      const line = r.kind === 'topic_cleanup'
+        ? `${d.deleted || 0} delete, ${d.kept || 0} rakhe`
+        : r.kind === 'heal_drafts'
+          ? `${d.healed || 0} draft heal (${d.candidates || 0} candidates)`
+          : r.kind === 'fix_post_basics'
+            ? `${d.fixed || 0}/${d.scanned || 0} posts fix`
+            : esc(String(r.result || '').slice(0, 120));
+      return `<li>${new Date(r.created_at * 1000).toISOString().replace('T', ' ').slice(0, 16)} UTC — <b>${esc(r.kind)}</b>: ${esc(line)}</li>`;
+    }).join('');
+    return A('Auto-heal', `<p><a href="/admin/business">Business page</a> | <a href="/admin/topics">Topics</a> | <a href="/admin">Admin</a></p>
+<h1>Auto-heal agent</h1>
+${msg ? `<p class="note">${esc(msg)}</p>` : ''}
+<p class="note">Ye agent <b>content/data</b> theek karta hai, code nahi. Live post ka body kabhi khud nahi badalta aur publish phir bhi human approval se hota hai. Har click ka result neeche run log me dikhta hai.</p>
+<div class="card"><div class="p"><b>Abhi ka hisaab</b><p class="m">Topics: ${cntLine(topicCnt)}</p><p class="m">Posts: ${cntLine(postCnt)}</p><p class="m">Business drafts: ${bizDrafts} &middot; missing metadata: ${missingMeta} &middot; missing image: ${missingImg}</p>${last ? `<p class="m">Aakhri cleanup: ${new Date(last.at * 1000).toISOString().replace('T', ' ').slice(0, 16)} UTC — ${last.deleted || 0} delete, ${last.kept || 0} rakhe</p>` : '<p class="m">Abhi tak auto cleanup nahi chala.</p>'}</div></div>
+<div class="card"><div class="p"><b>1. Topic cleanup (0 token)</b><p class="m">${preview.scanned} topics scan hue. Plan: <b>${preview.plan.deleteCount}</b> delete, <b>${preview.plan.keepCount}</b> rakho, ready buffer <b>${preview.plan.readyKept}</b>.${preview.plan.deleteCount ? '' : ' Kuch delete karne ki zaroorat nahi.'}</p>${previewRows ? `<details open><summary>Kya delete hoga (${preview.plan.deleteCount})</summary><ul>${previewRows}${preview.plan.deleteCount > 25 ? `<li>... aur ${preview.plan.deleteCount - 25}</li>` : ''}</ul></details>` : ''}<form method="post" action="/admin/autoheal/cleanup"><button class="g" ${preview.plan.deleteCount ? '' : 'disabled'}>Cleanup confirm karo (${preview.plan.deleteCount} topics delete)</button></form><p class="m">Sirf topics table saaf hoti hai. Posts, drafts aur live articles ko kuch nahi hota. Research dobara 0-token me ho sakta hai.</p></div></div>
+<div class="card"><div class="p"><b>2. Thin Business draft heal (AI token)</b><p class="m">Ek click = ek thin draft. Fresh sources, worked example aur result section add hote hain, phir fact-check dobara chalta hai. Fail ho to purana draft waisa hi rehta hai.</p><form method="post" action="/admin/autoheal/heal"><button class="g">1 thin Business draft heal karo</button></form><p class="m">Approval queue me ${bizDrafts} Business draft hain. Publish tabhi hoga jab tum review page se human-check karke approve karo.</p></div></div>
+<div class="card"><div class="p"><b>3. Missing summary/tags/meta fix (0 token)</b><p class="m">Article ke body se summary, title se tags aur summary se meta description bharta hai. Human-written fields ko overwrite nahi karta. ${missingMeta} posts me kuch missing hai.</p><form method="post" action="/admin/autoheal/basics"><button class="g">Missing metadata fix karo (${missingMeta})</button></form><p class="m">Missing image ${missingImg} posts me hai. Image review page se "Image refresh" se banao — AI/stock provider use ho sakta hai.</p></div></div>
+<div class="card"><div class="p"><b>Run log (last 8)</b>${runRows ? `<ul>${runRows}</ul>` : '<p class="m">Abhi koi run nahi.</p>'}</div></div>`);
+  }
+  if (p === '/admin/autoheal/cleanup' && req.method === 'POST') {
+    try {
+      const r = await cleanupTopics(env, cleanupOpts(env));
+      const detail = Object.entries(r.counts || {}).map(([k, v]) => `${k}: ${v}`).join(', ');
+      return go('/admin/autoheal?msg=' + encodeURIComponent(`Cleanup done: ${r.deleted} topics delete, ${r.kept} rakhe. ${detail}`.slice(0, 300)));
+    } catch (e) {
+      return go('/admin/autoheal?msg=' + encodeURIComponent('Cleanup ERROR: ' + String(e.message).slice(0, 250)));
+    }
+  }
+  if (p === '/admin/autoheal/heal' && req.method === 'POST') {
+    try {
+      const r = await healDrafts(env, { limit: 1 });
+      const first = (r.results || [])[0];
+      const msg = r.healed && first
+        ? `Draft heal ho gaya: ${first.title} (${first.fromWords} → ${first.words} shabd). Review page par padhkar approve karo.`
+        : `Heal nahi hua: ${(first && first.reason) || r.reason || 'unknown'}`;
+      return go('/admin/autoheal?msg=' + encodeURIComponent(msg.slice(0, 300)));
+    } catch (e) {
+      return go('/admin/autoheal?msg=' + encodeURIComponent('Heal ERROR: ' + String(e.message).slice(0, 250)));
+    }
+  }
+  if (p === '/admin/autoheal/basics' && req.method === 'POST') {
+    try {
+      const r = await fixPostBasics(env, { limit: 10 });
+      return go('/admin/autoheal?msg=' + encodeURIComponent(`Metadata fix: ${r.fixed}/${r.scanned} posts update hue (0 token).`));
+    } catch (e) {
+      return go('/admin/autoheal?msg=' + encodeURIComponent('Metadata ERROR: ' + String(e.message).slice(0, 250)));
+    }
+  }
+
   if (p === '/admin/topics') {
     const { results } = await env.DB.prepare('SELECT id,query,traffic,status,source_count,research FROM topics ORDER BY id DESC LIMIT 60').all();
     const grp = (await env.DB.prepare('SELECT status, COUNT(*) c FROM topics GROUP BY status').all()).results;
@@ -679,7 +778,7 @@ ${rows || '<p>Abhi koi business topic nahi. Upar "Naye business topics lao" daba
     const hint = (cnt.ready || 0) > 0
       ? `<p class="note">${cnt.ready} ready topic hain${staleReady ? ` (${staleReady} ke sources purane hain - "Draft likho" dabane par pehle apne aap fresh sources aayenge)` : ''}. Neeche "Ready topic se ek draft likho" dabao, ya kisi topic ko kholkar "Approve: iska article likho" dabao.</p>`
       : '';
-    return A('Topics', `<p><a href="/admin/business">← Business page</a> | <a href="/admin">Admin</a></p><h1>Trending topics</h1>${msg ? `<p class="note">${esc(msg)}</p>` : ''}${counts}${hint}<form method="post" action="/admin/topics/run"><button>Abhi trends + research chalao</button></form><form method="post" action="/admin/topics/research"><button class="g">Agla pending topic research karo (1 click = 1 result)</button></form><form method="post" action="/admin/card"><button class="g">Card banao (0 token, turant)</button></form><form method="post" action="/admin/write"><button class="g">Ready topic se ek draft likho (1-2 min lagenge, page band mat karna)</button></form>${results.map((r) => `<div class="card"><div class="p"><a href="/admin/topic/${r.id}"><b>${esc(r.query)}</b></a><div class="m"><span class="tag">${esc(r.status)}</span>${rowTag(r)} sources: ${r.source_count} &middot; ${esc(r.traffic)}</div></div></div>`).join('') || '<p>Abhi koi topic nahi. Upar ka button dabao.</p>'}`);
+    return A('Topics', `<p><a href="/admin/business">← Business page</a> | <a href="/admin">Admin</a> | <a href="/admin/autoheal">Auto-heal</a></p><h1>Trending topics</h1>${msg ? `<p class="note">${esc(msg)}</p>` : ''}${counts}${hint}<form method="post" action="/admin/topics/run"><button>Abhi trends + research chalao</button></form><form method="post" action="/admin/topics/research"><button class="g">Agla pending topic research karo (1 click = 1 result)</button></form><form method="post" action="/admin/card"><button class="g">Card banao (0 token, turant)</button></form><form method="post" action="/admin/write"><button class="g">Ready topic se ek draft likho (1-2 min lagenge, page band mat karna)</button></form>${results.map((r) => `<div class="card"><div class="p"><a href="/admin/topic/${r.id}"><b>${esc(r.query)}</b></a><div class="m"><span class="tag">${esc(r.status)}</span>${rowTag(r)} sources: ${r.source_count} &middot; ${esc(r.traffic)}</div></div></div>`).join('') || '<p>Abhi koi topic nahi. Upar ka button dabao.</p>'}`);
   }
   const tm = p.match(/^\/admin\/topic\/(\d+)$/);
   if (tm) {
@@ -709,6 +808,22 @@ ${rows || '<p>Abhi koi business topic nahi. Upar "Naye business topics lao" daba
       : `<form method="post" action="/admin/topic/${r.id}/write"><button class="g">Approve: iska article likho (AI token lagenge, 1-2 min)</button></form>`;
     const actions = `<div class="card"><div class="p"><b>Actions</b><form method="post" action="/admin/topic/${r.id}/research"><button class="o">Research dobara chalao (0 token, sources + pre-read)</button></form><form method="post" action="/admin/topic/${r.id}/debate"><button class="o">Multi-AI debate chalao (token, cross-check + claim ledger)</button></form>${writeBtns}<p class="m">Write dabane par debate pehle apne aap chalega (agar 2 ghante me nahi chala). Sirf code-verified claim ledger writer ko milta hai. Debate ek baar chala to write me wahi reuse hota hai.${bizTopic ? ' Business draft me framework, counterpoint, playbook aur risks code se check honge; stock tip / guarantee language block hai.' : ''}</p></div></div>`;
     return A('Topic', `<h1>${esc(r.query)}</h1><p><span class="tag">${esc(r.status)}</span> ${esc(r.traffic)}</p>${tmsg ? `<p class="note">${esc(tmsg)}</p>` : ''}${pv}${pre}${debateHtml}${actions}${d.errors && d.errors.length ? `<p class="note">Provider errors: ${esc(d.errors.join(' | '))} (koshish: ${d.tried || 0} outlets)</p>` : ''}${d.reject_reason ? `<p class="note">Reject karne ki wajah: ${esc(d.reject_reason)}</p>` : ''}${d.park_reason ? `<p class="note">Abhi ruka hai (baad mein dobara try hoga): ${esc(d.park_reason)}</p>` : ''}${d.card ? `<div class="card"><div class="p"><b>Card: ${esc(d.card.hook)}</b> <span class="tag">${esc(d.card.label || '')}</span><ul>${(d.card.facts || []).map((f) => `<li>${esc(f.text)} <span class="m">(${esc((f.outlets || []).join(', '))})</span></li>`).join('')}</ul>${r.status === 'card_live' ? `<p><a href="/card/${r.id}" target="_blank">Card post dekho: /card/${r.id}</a></p>` : `<form method="post" action="/admin/topic/${r.id}/card-post"><button class="g">Card post banao (chhota AI call, turant live)</button></form>`}</div></div>` : ''}${d.diag ? `<p class="note">Pichli koshish ka hisaab: overlap ${Math.round((d.diag.overlap || 0) * 100)}%, sabse lambi copy ${d.diag.longest || 0} shabd, score ${d.diag.score}. Claims: ${esc((d.diag.claimList || []).map((x) => (x.ok ? 'OK' : 'FAIL(' + (x.why || '') + ')') + ' ' + x.c).join(' | ').slice(0, 900))}</p>` : ''}${d.check ? `<p class="note">Checks: ${esc(JSON.stringify(d.check))}</p>` : ''}${(d.sources || []).map((s) => `<div class="card"><div class="p"><b>${esc(s.source)}</b><br><a href="${esc(/^https?:\/\//i.test(String(s.url || '')) ? s.url : '#')}" target="_blank" rel="noopener">${esc(s.title)}</a><p class="m">${esc(s.snippet)}</p><p class="m">${(s.text || '').length} akshar text</p></div></div>`).join('') || '<p>Research abhi baaki hai.</p>'}<p><a href="/admin/topics">Back</a></p>`);
+  }
+
+  // Deepen an existing Business draft: fresh sources + more detail + worked example + result.
+  // Only drafts are touched; live posts never change without human approval.
+  const dpm = p.match(/^\/admin\/post\/(\d+)\/deepen$/);
+  if (dpm && req.method === 'POST') {
+    const pid = Number(dpm[1]);
+    try {
+      const r = await deepenOne(env, pid);
+      const msg = r.ok
+        ? `Deepen ho gaya: ${r.fromWords} → ${r.words} shabd, score ${r.score}, depth ${r.gate ? r.gate.score : '-'}/100${r.verified ? ', fact-check verified' : ', fact-check manually dekho'}. Dobara padhkar approve karo.`
+        : `Deepen fail: ${r.reason}`;
+      return go('/admin/post/' + pid + '?msg=' + encodeURIComponent(msg));
+    } catch (e) {
+      return go('/admin/post/' + pid + '?msg=' + encodeURIComponent('Deepen ERROR: ' + String(e.message).slice(0, 250)));
+    }
   }
 
   const m = p.match(/^\/admin\/post\/(\d+)(\/action)?$/);
@@ -820,6 +935,10 @@ ${rows || '<p>Abhi koi business topic nahi. Upar "Naye business topics lao" daba
     const act = '/admin/post/' + id + '/action', vid = ytId(r.video_url), mmsg = url.searchParams.get('msg');
     const mediaBlock = `<div class="card"><div class="p"><b>Image / Video</b>${mmsg ? `<p class="note">${esc(mmsg)}</p>` : ''}${r.image_credit ? `<p class="m">Image credit: ${esc(r.image_credit)}</p>` : ''}${vid ? `<div class="vid"><iframe loading="lazy" title="video" src="https://www.youtube-nocookie.com/embed/${vid}" allowfullscreen></iframe></div>` : '<p class="m">Abhi video nahi hai.</p>'}<form method="post" action="${act}"><input type="hidden" name="a" value="media_refresh"><input name="q" placeholder="English search words, jaise: Ann Li tennis"><button class="o">Thumbnail + video dobara banao</button></form><form method="post" action="${act}"><input type="hidden" name="a" value="save_media"><input name="image_url" value="${esc(r.image_url)}" placeholder="Image URL (https://...)"><input name="image_credit" value="${esc(r.image_credit)}" placeholder="Image credit"><input name="video_url" value="${esc(r.video_url)}" placeholder="YouTube link"><button>Image / video save karo</button></form></div></div>`;
     const vr = validatePost(r, { check: parseCheck(r) }), ck = parseCheck(r), vm = url.searchParams.get('vm');
+    const gap = r.category === 'Business' ? gapReport(r) : null;
+    const gapHtml = gap
+      ? `<div class="card"><div class="p"><b>Content gap analysis (0 token)</b> <span class="tag">${gap.needed ? gap.gaps.length + ' kami' : 'detailed'}</span><p class="m">${gap.words} shabd &middot; ${gap.headings} sections &middot; depth score ${gap.score}/100</p>${gap.needed ? `<ul>${gap.gaps.map((g) => `<li>${esc(g.msg)}</li>`).join('')}</ul>` : '<p class="m">Setup, money engine, framework, worked example, counterpoint, playbook, risks, result, honesty aur analysis — sab maujood hain.</p>'}${r.status === 'draft' ? `<form method="post" action="/admin/post/${id}/deepen"><button class="g">Deepen karo: fresh sources + full detail + example + result (AI, 2-3 min)</button></form><p class="m">Ye draft ko expand karta hai, phir fact-check dobara chalta hai. Publish tabhi hoga jab tum approve karo.</p>` : `<p class="m">Live/approved post ko yahan se deepen nahi karte. Pehle "Back to draft" dabao, phir deepen chalao, phir dobara approve karo.</p>`}</div></div>`
+      : '';
     const corrections = await correctionsForPost(env, id);
     const stale = await staleFacts(env, id, Number(env.FACT_MAX_AGE_HOURS || 24));
     const unc = (ck && Array.isArray(ck.unconfirmed)) ? ck.unconfirmed.filter((x) => x && x.text) : [];
@@ -849,6 +968,7 @@ ${rows || '<p>Abhi koi business topic nahi. Upar "Naye business topics lao" daba
     const approveBtns = vr.ok ? btn('approve_now', 'Approve + publish now (human check ke baad)', 'g') + btn('approve_random', 'Approve + publish at random time (within 1 hr)')
       : '<p class="note">Upar ki &#10060; galtiyan theek hone tak Approve band hai.</p>' + btnF('approve_now', 'Phir bhi approve + publish karo (meri zimmedari)', 'r');
     return A('Review', `<h1>${esc(r.title)}</h1><p><span class="tag">${esc(r.status)}</span> score: ${r.score ?? '-'} &middot; ${r.word_count || words(r.body)} words &middot; ${esc(r.category)}</p>${r.image_url ? (aiImg(r.image_url) ? thumb(r, true) : `<img src="${esc(r.image_url)}" style="max-width:100%">`) : ''}<p><i>${esc(r.summary)}</i></p>${renderBody(r.body).html}
+${gapHtml}
 ${checkBlock}
 ${humanBlock}
 ${mediaBlock}
@@ -862,5 +982,5 @@ ${approveBtns}${btn('reject', 'Reject', 'r')}${btn('to_draft', 'Back to draft', 
   const lwHtml = lw ? `<p class="note">Aakhri auto-draft koshish (${new Date((lw.at + 19800) * 1000).toISOString().replace('T', ' ').slice(0, 16)} IST): ${esc(lw.msg)}</p>` : '<p class="m">Auto-draft ne abhi tak koi koshish record nahi ki.</p>';
   const sw = (k, on, label) => `<form method="post" action="/admin/setting"><input type="hidden" name="k" value="${k}"><input type="hidden" name="v" value="${on ? 0 : 1}"><button class="${on ? 'g' : 'o'}">${label}: ${on ? 'ON (band karne ke liye dabao)' : 'OFF (chalu karne ke liye dabao)'}</button></form>`;
   const panel = `<div class="card"><div class="p"><b>Switches</b>${sw('auto_write', aw, 'Auto-draft (har ghante AI khud draft likhe)')}${sw('auto_publish', ap, 'AI auto-publish (draft khud live kare)')}${lwHtml}<p class="m">Auto-draft ON = cron har ghante try karega, par ek din me max <b>${esc(env.BUSINESS_DAILY_LIMIT || env.DAILY_POST_LIMIT || 3)}</b> draft banenge aur approval queue <b>${esc(env.AUTO_DRAFT_QUEUE_MAX || 6)}</b> drafts par ruk jayegi. Jo draft business gate ya score ${esc(env.AUTO_DRAFT_MIN_SCORE || 60)} se neeche hai wo auto-reject ho jayega, taaki tumhe sirf acche drafts dikhein. Auto-draft OFF ho to draft sirf tab banega jab tum Topics page par green button dabaoge. Auto-publish ON ho to score ${esc(env.AUTO_APPROVE_MIN_SCORE || 95)} ya zyada wale drafts, ${esc(env.AUTO_APPROVE_HOURS || 0)} ghante tak tumne kuch na kiya to, khud live ho jayenge. Note: auto-publish sirf tab hoga jab check_json me verified true ho (analysis + har claim ka sabut pass) aur SCORE_MAX ki limit cross ho. Default SCORE_MAX 94 hai, isliye auto-publish practically OFF hai - ye AdSense safety ke liye jaan-boojh kar hai. Dono OFF = har post tum khud approve karoge.</p></div></div>`;
-  return A('Admin', `<p><a href="/admin/new">+ New test draft</a> | <a href="/admin/business">Business</a> | <a href="/admin/topics">Topics</a> | <a href="/admin/ai-test">AI test</a> | <a href="/admin/api-status">API status</a> | <a href="/" target="_blank">Site</a> | <a href="/admin/logout">Logout</a></p>${panel}${rows || '<p>Koi post nahi.</p>'}`);
+  return A('Admin', `<p><a href="/admin/new">+ New test draft</a> | <a href="/admin/business">Business</a> | <a href="/admin/topics">Topics</a> | <a href="/admin/autoheal">Auto-heal</a> | <a href="/admin/ai-test">AI test</a> | <a href="/admin/api-status">API status</a> | <a href="/" target="_blank">Site</a> | <a href="/admin/logout">Logout</a></p>${panel}${rows || '<p>Koi post nahi.</p>'}`, 200, false);
 }
