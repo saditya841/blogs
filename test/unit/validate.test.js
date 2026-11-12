@@ -109,6 +109,25 @@ describe('validatePost — fact-check records', () => {
     assert.ok(codes(r.errors).includes('stale'));
   });
 
+  test('business analysis may use an older structural source (warning, not block)', () => {
+    const r = validatePost(good({ category: 'Business' }), {
+      nowSec: NOW,
+      check: check({ newest_source: NOW - 120 * 86400 })
+    });
+    assert.equal(r.ok, true);
+    assert.ok(codes(r.warnings).includes('stale_business'));
+  });
+
+  test('business source beyond the business window still blocks', () => {
+    const r = validatePost(good({ category: 'Business' }), {
+      nowSec: NOW,
+      check: check({ newest_source: NOW - 400 * 86400 }),
+      businessFreshDays: 365
+    });
+    assert.equal(r.ok, false);
+    assert.ok(codes(r.errors).includes('stale'));
+  });
+
   test('a fact-check that skipped claims blocks publish', () => {
     const r = validatePost(good(), { nowSec: NOW, check: check({ coverageLow: true }) });
     assert.equal(r.ok, false);

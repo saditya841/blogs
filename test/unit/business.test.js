@@ -3,16 +3,19 @@ import assert from 'node:assert/strict';
 import {
   BUSINESS_FRAMEWORKS,
   BUSINESS_HOT_QUERIES,
+  BUSINESS_KINDS,
   BUSINESS_ROLES,
   BUSINESS_TOPIC_BANK,
   businessAngle,
   businessGate,
+  businessKind,
   businessMessages,
   businessSeeds,
   derivedNumbers,
   frameworkFor,
   hotBusinessTopics,
-  isBusinessMode
+  isBusinessMode,
+  kindRules
 } from '../../src/business.js';
 import { classify, preflight, YMYL_STRICT } from '../../src/playbook.js';
 import { validatePost } from '../../src/validate.js';
@@ -61,7 +64,7 @@ describe('business topic bank and helpers', () => {
   });
 
   test('every hot-traffic query exists in the topic bank', () => {
-    assert.ok(BUSINESS_HOT_QUERIES.length >= 15);
+    assert.ok(BUSINESS_HOT_QUERIES.length >= 40);
     const bank = new Set(BUSINESS_TOPIC_BANK.map((x) => x.q.toLowerCase()));
     for (const q of BUSINESS_HOT_QUERIES) assert.ok(bank.has(q.toLowerCase()), q);
     assert.equal(new Set(BUSINESS_HOT_QUERIES.map((q) => q.toLowerCase())).size, BUSINESS_HOT_QUERIES.length);
@@ -99,8 +102,83 @@ describe('business topic bank and helpers', () => {
   });
 
   test('review roles are neutral operators, not gurus', () => {
-    assert.deepEqual(BUSINESS_ROLES.map((r) => r.id), ['strategist', 'operator', 'skeptic']);
-    for (const r of BUSINESS_ROLES) assert.ok(/business|unit economics|risk|failure/i.test(r.focus));
+    assert.deepEqual(BUSINESS_ROLES.map((r) => r.id), ['strategist', 'operator', 'skeptic', 'verifier']);
+    for (const r of BUSINESS_ROLES) assert.ok(/business|unit economics|risk|failure|source|real/i.test(r.focus));
+  });
+});
+
+describe('businessKind — three editorial categories plus the model explainer', () => {
+  test('share-market education is detected first', () => {
+    for (const q of [
+      'stock market basics India how shares work',
+      'sensex nifty explained for beginners India',
+      'PE ratio explained India stock valuation',
+      'demat account charges India comparison'
+    ]) assert.equal(businessKind(q, {}), 'market', q);
+  });
+
+  test('founder queries are detected from words and names', () => {
+    assert.equal(businessKind('Dhirubhai Ambani early business lessons Reliance', {}), 'founder');
+    assert.equal(businessKind('Kishore Biyani rise and fall lessons', {}), 'founder');
+    assert.equal(businessKind('Nikhil Kamath Zerodha lessons', {}), 'founder');
+  });
+
+  test('startup-cost queries become business plans', () => {
+    for (const q of [
+      'coffee shop startup cost India break-even',
+      'PG hostel business India cost profit',
+      'EV charging station investment India payback'
+    ]) assert.equal(businessKind(q, {}), 'plan', q);
+  });
+
+  test('company/model queries stay model explainers', () => {
+    assert.equal(businessKind('DMart business model low margin high volume', {}), 'model');
+    assert.equal(businessKind('Zerodha business model revenue profit', {}), 'model');
+  });
+
+  test('research can pin a kind explicitly', () => {
+    assert.equal(businessKind('anything at all', { kind: 'market' }), 'market');
+    assert.equal(businessKind('anything at all', { kind: 'nonsense' }), 'model');
+  });
+
+  test('every kind has a label and a structure focus', () => {
+    for (const [id, k] of Object.entries(BUSINESS_KINDS)) {
+      assert.ok(k.label && k.section, id);
+    }
+    assert.deepEqual(Object.keys(BUSINESS_KINDS).sort(), ['founder', 'market', 'model', 'plan']);
+  });
+
+  test('the expanded topic bank covers all four kinds', () => {
+    const kinds = new Set(BUSINESS_TOPIC_BANK.map((t) => businessKind(t.q, t)));
+    for (const k of Object.keys(BUSINESS_KINDS)) assert.ok(kinds.has(k), k);
+  });
+});
+
+describe('kindRules — the evidence each category needs', () => {
+  test('market rules forbid tips and demand risk/cost/downside', () => {
+    const r = kindRules('market');
+    assert.match(r, /buy\/sell|target price/i);
+    assert.match(r, /risk/i);
+    assert.match(r, /not investment advice/i);
+  });
+
+  test('plan rules demand startup cost, fixed cost and break-even', () => {
+    const r = kindRules('plan');
+    assert.match(r, /startup-cost/i);
+    assert.match(r, /fixed cost/i);
+    assert.match(r, /break-even/i);
+    assert.match(r, /downside/i);
+  });
+
+  test('founder rules demand a dated timeline and no invented quotes', () => {
+    const r = kindRules('founder');
+    assert.match(r, /dated timeline/i);
+    assert.match(r, /invent a quote/i);
+    assert.match(r, /survivorship/i);
+  });
+
+  test('unknown kinds fall back to the model rules', () => {
+    assert.match(kindRules('nonsense'), /who pays whom/i);
   });
 });
 
@@ -123,6 +201,50 @@ describe('business prompt', () => {
     assert.match(user.content, /## What is not confirmed/);
     assert.match(user.content, /plain language/i);
     assert.match(all, /1200 crore/);
+  });
+
+  test('each article kind gets its own evidence rules and structure focus', () => {
+    const plan = businessMessages({}, {
+      topic: { query: 'coffee shop startup cost India break-even' },
+      lang: 'en',
+      sources: [{ title: 'Cafe cost report', url: 'https://www.livemint.com/x', text: 'Setup cost was 12 lakh.' }]
+    });
+    const planText = plan[0].content + plan[1].content;
+    assert.match(plan[1].content, /KIND: plan/);
+    assert.match(planText, /startup-cost breakdown/i);
+    assert.match(planText, /break-even/i);
+    assert.match(planText, /STRUCTURE FOCUS FOR THIS KIND/);
+
+    const founder = businessMessages({}, {
+      topic: { query: 'Dhirubhai Ambani early business lessons Reliance' },
+      lang: 'en'
+    });
+    assert.match(founder[1].content, /KIND: founder/);
+    assert.match(founder[1].content, /dated timeline/i);
+
+    const market = businessMessages({}, {
+      topic: { query: 'PE ratio explained India stock valuation' },
+      lang: 'en'
+    });
+    assert.match(market[1].content, /KIND: market/);
+    assert.match(market[0].content, /not investment advice/i);
+  });
+
+  test('sources are ordered by trust and labelled in the prompt', () => {
+    const messages = businessMessages({}, {
+      topic: { query: 'DMart business model low margin high volume' },
+      lang: 'en',
+      sources: [
+        { title: 'Blog take', url: 'https://medium.com/@x/dmart', text: 'A blog opinion.' },
+        { title: 'SEBI circular', url: 'https://www.sebi.gov.in/legal.html', text: 'A regulator note.' },
+        { title: 'Mint report', url: 'https://www.livemint.com/market', text: 'A newsroom report.' }
+      ]
+    });
+    const text = messages[1].content;
+    assert.match(text, /\[trust: official\/regulator\]/);
+    assert.match(text, /SOURCE TRUST: 3 sources/);
+    assert.ok(text.indexOf('sebi.gov.in') < text.indexOf('livemint.com'));
+    assert.ok(text.indexOf('livemint.com') < text.indexOf('medium.com'));
   });
 
   test('Hindi mode asks for Devanagari output', () => {
@@ -199,6 +321,30 @@ describe('businessGate — code decides if it is a real business article', () =>
     const g = businessGate({ title: 'Business', summary: 'Short.', body: '## Setup\n\nBahut chhota text hai.' }, { minWords: 900 });
     assert.equal(g.ok, false);
     assert.ok(g.errors.some((e) => e.code === 'short'));
+  });
+
+  test('a plan article without cost or break-even evidence gets a kind warning', () => {
+    const body = goodBusiness().body.replace(/rent/g, 'bijli').replace(/cost/gi, 'kharch');
+    const g = businessGate(goodBusiness({ title: 'Coffee shop startup cost India break-even', body }), { minWords: 900 });
+    assert.equal(g.kind, 'plan');
+    assert.equal(g.hasKindEvidence, false);
+    assert.ok(g.warnings.some((w) => w.code === 'kind_plan'), JSON.stringify(g.warnings));
+  });
+
+  test('a founder story without a dated timeline gets a kind warning', () => {
+    const body = goodBusiness().body.replace(/2024/g, 'pichhle saal');
+    const g = businessGate(goodBusiness({ title: 'Dhirubhai Ambani early business lessons Reliance', body }), { minWords: 900 });
+    assert.equal(g.kind, 'founder');
+    assert.equal(g.hasKindEvidence, false);
+    assert.ok(g.warnings.some((w) => w.code === 'kind_founder'), JSON.stringify(g.warnings));
+  });
+
+  test('market education without risk or downside language gets a kind warning', () => {
+    const body = goodBusiness().body.replace(/risk/gi, 'dikkat').replace(/downside/gi, 'mushkil');
+    const g = businessGate(goodBusiness({ title: 'PE ratio explained India stock valuation', body }), { minWords: 900 });
+    assert.equal(g.kind, 'market');
+    assert.equal(g.hasKindEvidence, false);
+    assert.ok(g.warnings.some((w) => w.code === 'kind_market'), JSON.stringify(g.warnings));
   });
 });
 
