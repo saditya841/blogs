@@ -153,6 +153,7 @@ koi key nahi chahiye. Sirf `PEXELS_API_KEY` / `YOUTUBE_API_KEY` na hone se photo
 | `BUSINESS_LANG` | `en` | Default business article language (`en`/`hi`). Admin se per draft EN/HI chuna ja sakta hai. |
 | `BUSINESS_DAILY_LIMIT` | `3` | Business mode ka hard daily draft cap. Isse zyada draft ek din me nahi bante. |
 | `BUSINESS_MIN_WORDS` | `1200` | Business article ki minimum depth (words). Gate 80% se neeche hard-fail karta hai. |
+| `BUSINESS_SOURCE_FRESH_DAYS` | `365` | Business analysis ke liye source freshness window. News 3 din hi rehta hai; 90 din se purane source par warning. |
 | `BUSINESS_TOPIC_LIMIT` | `3` | Ek run me kitne naye business topics laane hain. |
 | `TOPIC_READY_MAX` | `12` | Auto-heal cleanup ready backlog ka cap (3-4 din ka writing buffer). |
 | `TOPIC_THIN_DAYS` | `7` | Itne din purane thin/rejected topics delete. |
@@ -371,7 +372,7 @@ Safety rules jo code me already hain:
 npm test
 ```
 
-364 tests in 23 files (`preread`, `validate`, `writer`, `editor`, `playbook`, `verify`, `facts`, `cardpost`, `media`,
+366 tests in 23 files (`preread`, `validate`, `writer`, `editor`, `playbook`, `verify`, `facts`, `cardpost`, `media`,
 `trends`, `ai`, `api-manager`, `seo-optimizer`, `index`, `claims`, `similarity`, `style`, `debate`, `quality-layers`, `business`, `autodraft`, `deepen`, `autoheal`). Sab pure functions / fake KV / fake fetch -
 koi network call nahi, koi real DB nahi. `quality-layers` conflicts, originality, specificity, voice, fact
 registry, corrections aur source liveness ko cover karta hai (in-memory SQLite se, network nahi).

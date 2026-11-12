@@ -548,6 +548,7 @@ corrections(id, post_id, old_text, new_text, reason, created_at)
 | `BUSINESS_LANG` | `en` | Default business output language (`en`/`hi`) |
 | `BUSINESS_DAILY_LIMIT` | `3` | Business mode ka hard daily draft cap |
 | `BUSINESS_MIN_WORDS` | `1200` | Business article depth floor (80% hard fail) |
+| `BUSINESS_SOURCE_FRESH_DAYS` | `365` | Business analysis source window (news 3 days; 90+ days warning) |
 | `BUSINESS_TOPIC_LIMIT` | `3` | Ek run me naye business topics |
 | `TOPIC_READY_MAX` | `12` | Auto-heal ready backlog cap |
 | `TOPIC_THIN_DAYS` | `7` | Purane thin/rejected topics delete |
@@ -717,7 +718,7 @@ baaki tables `IF NOT EXISTS` hain.
 
 ## 16. Test coverage
 
-- `npm test` → **364 pass, 0 fail** (91 suites, 23 files)
+- `npm test` → **366 pass, 0 fail** (91 suites, 23 files)
 - `npm run check` → **33/33 modules load**
 
 New tests: `claims`, `similarity`, `style`, `debate` (ledger, duplicate, human-style, safe roles,

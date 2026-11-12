@@ -45,6 +45,8 @@ BUSINESS_MODE = "true"
 BUSINESS_LANG = "en"
 BUSINESS_DAILY_LIMIT = "3"
 BUSINESS_MIN_WORDS = "1200"
+# Business analysis can use annual reports/structural sources; news still uses 3 days.
+BUSINESS_SOURCE_FRESH_DAYS = "365"
 BUSINESS_TOPIC_LIMIT = "3"
 # Auto-heal topic cleanup: keep a 3-4 day writing buffer, prune the rest.
 TOPIC_READY_MAX = "12"
