@@ -12,7 +12,12 @@ const hostOf = (u) => { try { return new URL(u).hostname.replace(/^www\./, ''); 
 export function validatePost(p, o = {}) {
   const errors = [], warnings = [];
   const E = (code, msg) => errors.push({ code, msg }), W = (code, msg) => warnings.push({ code, msg });
-  const now = o.nowSec || Math.floor(Date.now() / 1000), fresh = (o.freshDays || 3) * 86400;
+  const now = o.nowSec || Math.floor(Date.now() / 1000);
+  // A business analysis often rests on an annual report or a structural explainer, not today's news.
+  // News keeps the 3-day rule; Business gets a wider window (and a 90-day soft warning).
+  const business = p.category === 'Business';
+  const freshDays = Number(o.freshDays) || (business ? Number(o.businessFreshDays) || 365 : 3);
+  const fresh = freshDays * 86400;
   const title = String(p.title || '').trim(), summary = String(p.summary || '').trim(), body = String(p.body || '');
 
   if (!title) E('title', 'Title khali hai');
@@ -68,8 +73,14 @@ export function validatePost(p, o = {}) {
     if (c.verified !== true) E('not_verified', 'Fact-check pass nahi hua');
     if (c.coverageLow) E('coverage', 'Fact-check poora nahi hua (checker ne kam claims diye): post khud padhkar dekho');
     if ((c.unsupportedCount || 0) > 0) E('unsupported', `${c.unsupportedCount} claims ka sabut sources mein nahi`);
-    if (c.newest_source && now - c.newest_source > fresh) E('stale', `Sabse nayi source ${Math.round((now - c.newest_source) / 86400)} din purani hai`);
+    if (c.newest_source && now - c.newest_source > fresh) E('stale', `Sabse nayi source ${Math.round((now - c.newest_source) / 86400)} din purani hai (allowed ${freshDays} din)`);
+    else if (business && c.newest_source && now - c.newest_source > 90 * 86400) W('stale_business', `Sabse nayi source ${Math.round((now - c.newest_source) / 86400)} din purani hai — evergreen analysis ke liye allowed, par numbers ki tareekh check karo`);
     else if (!c.newest_source) W('no_dates', 'Sources ki tareekh pata nahi: khabar taaza hai ya purani, khud dekh lo');
+    if (c.sourceTrust && c.sourceTrust.level === 'weak') {
+      const detail = (c.sourceTrust.text || `${c.sourceTrust.score}/100`).slice(0, 220);
+      W('source_trust', `Sources ki trust weak hai (${detail}) — official filing/financial press se cross-check karo`);
+      if (o.strict) E('source_trust_strict', 'Auto-publish ke liye source trust weak hai');
+    }
   } else if (o.strict) E('no_check', 'Is post ka fact-check record nahi mila (auto-publish nahi hoga)');
   else W('no_check', 'Is post ka fact-check record nahi mila (manual draft?). Khud jaanch lo.');
 

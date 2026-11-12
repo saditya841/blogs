@@ -15,6 +15,7 @@ import { collectSources } from './trends.js';
 import { businessGate, businessMeta, businessMessages, derivedNumbers } from './business.js';
 import { copyCheck, parseDraft, ungroundedNumbers } from './writer.js';
 import { saveFingerprint } from './similarity.js';
+import { trustMeta, trustSummary } from './sourcetrust.js';
 
 const now = () => Math.floor(Date.now() / 1000);
 const countWords = (s) => String(s || '').split(/\s+/).filter(Boolean).length;
@@ -146,6 +147,7 @@ export async function deepenOne(env, postId, opts = {}) {
     overlap: finalCc.overlap,
     lang,
     business: businessMeta(gate),
+    sourceTrust: trustMeta(trustSummary(sources)),
     deepen: {
       at: now(),
       from_words: countWords(post.body),

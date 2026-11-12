@@ -239,7 +239,7 @@ async function autoApprove(env) {
   const { results } = await env.DB.prepare(`SELECT * FROM posts WHERE status='draft' AND score IS NOT NULL AND score>=?1 AND created_at<=?2 ORDER BY id LIMIT 20`).bind(min, now() - hrs * 3600).all();
   for (const p of results) {
     // strict: no fact-check record, an unsupported claim, a stale source or a missing required field => a human decides
-    if (!validatePost(p, { check: parseCheck(p), strict: true }).ok) continue;
+    if (!validatePost(p, { check: parseCheck(p), strict: true, businessFreshDays: Number(env.BUSINESS_SOURCE_FRESH_DAYS || 365) }).ok) continue;
     // A human must have read and edited this draft first (unless REQUIRE_HUMAN_EDIT is explicitly off).
     // No human_edited_at = NO auto-publish. This is the main "written by a person" safety layer.
     if (humanEditRequired(env) && !p.human_edited_at) continue;
@@ -669,7 +669,7 @@ async function admin(req, env, p, url) {
     const lang = String(env.BUSINESS_LANG || 'en').toLowerCase() === 'hi' ? 'hi' : 'en';
     const rows = results.map((r) => {
       let d = {}; try { d = JSON.parse(r.research || '{}'); } catch {}
-      const meta = [d.heat === 'high' ? 'HIGH TRAFFIC' : d.heat === 'fresh' ? 'fresh news' : '', d.framework ? `framework: ${d.framework}` : '', d.angle ? `angle: ${d.angle}` : '', `sources: ${r.source_count || 0}`].filter(Boolean).join(' · ');
+      const meta = [d.heat === 'high' ? 'HIGH TRAFFIC' : d.heat === 'fresh' ? 'fresh news' : '', d.kind ? `kind: ${d.kind}` : '', d.framework ? `framework: ${d.framework}` : '', d.angle ? `angle: ${d.angle}` : '', `sources: ${r.source_count || 0}`].filter(Boolean).join(' · ');
       const write = r.status === 'ready'
         ? `<form method="post" action="/admin/business/write" style="display:inline"><input type="hidden" name="topicId" value="${r.id}"><input type="hidden" name="lang" value="en"><button class="g">Write English</button></form>
            <form method="post" action="/admin/business/write" style="display:inline"><input type="hidden" name="topicId" value="${r.id}"><input type="hidden" name="lang" value="hi"><button class="g">Write Hindi</button></form>`
@@ -869,7 +869,7 @@ ${msg ? `<p class="note">${esc(msg)}</p>` : ''}
         }
         const newBody = bodyEdited ? bodyIn : String(pr.body || '');
         const wc = words(newBody);
-        const vr = validatePost({ ...pr, body: newBody, word_count: wc }, { check: parseCheck(pr) });
+        const vr = validatePost({ ...pr, body: newBody, word_count: wc }, { check: parseCheck(pr), businessFreshDays: Number(env.BUSINESS_SOURCE_FRESH_DAYS || 365) });
         if (!vr.ok) return fail('Approve nahi hua: ' + vr.errors.map((e) => e.msg).join('; '));
         if (bodyEdited) {
           await env.DB.prepare('UPDATE posts SET body=?,word_count=? WHERE id=?').bind(newBody, wc, id).run();
@@ -916,7 +916,7 @@ ${msg ? `<p class="note">${esc(msg)}</p>` : ''}
         if (humanEditRequired(env) && (!pr || !pr.human_edited_at)) {
           return go('/admin/post/' + id + '?vm=' + encodeURIComponent('Human edit gate: neeche form me note (30+ akshar) ya body edit + "3 random facts" checkbox bharo, phir "Human-check ke saath approve" dabao. Turant publish karna ho to neeche red force button hai.'));
         }
-        const vr = pr ? validatePost(pr, { check: parseCheck(pr) }) : { ok: true, errors: [] };
+        const vr = pr ? validatePost(pr, { check: parseCheck(pr), businessFreshDays: Number(env.BUSINESS_SOURCE_FRESH_DAYS || 365) }) : { ok: true, errors: [] };
         if (!vr.ok) return go('/admin/post/' + id + '?vm=' + encodeURIComponent('Approve nahi hua: ' + vr.errors.map((e) => e.msg).join('; ')));
       }
       const q = {
@@ -934,7 +934,7 @@ ${msg ? `<p class="note">${esc(msg)}</p>` : ''}
     const btn = (a, label, c = '') => `<form method="post" action="/admin/post/${id}/action"><input type="hidden" name="a" value="${a}"><button class="${c}">${label}</button></form>`;
     const act = '/admin/post/' + id + '/action', vid = ytId(r.video_url), mmsg = url.searchParams.get('msg');
     const mediaBlock = `<div class="card"><div class="p"><b>Image / Video</b>${mmsg ? `<p class="note">${esc(mmsg)}</p>` : ''}${r.image_credit ? `<p class="m">Image credit: ${esc(r.image_credit)}</p>` : ''}${vid ? `<div class="vid"><iframe loading="lazy" title="video" src="https://www.youtube-nocookie.com/embed/${vid}" allowfullscreen></iframe></div>` : '<p class="m">Abhi video nahi hai.</p>'}<form method="post" action="${act}"><input type="hidden" name="a" value="media_refresh"><input name="q" placeholder="English search words, jaise: Ann Li tennis"><button class="o">Thumbnail + video dobara banao</button></form><form method="post" action="${act}"><input type="hidden" name="a" value="save_media"><input name="image_url" value="${esc(r.image_url)}" placeholder="Image URL (https://...)"><input name="image_credit" value="${esc(r.image_credit)}" placeholder="Image credit"><input name="video_url" value="${esc(r.video_url)}" placeholder="YouTube link"><button>Image / video save karo</button></form></div></div>`;
-    const vr = validatePost(r, { check: parseCheck(r) }), ck = parseCheck(r), vm = url.searchParams.get('vm');
+    const vr = validatePost(r, { check: parseCheck(r), businessFreshDays: Number(env.BUSINESS_SOURCE_FRESH_DAYS || 365) }), ck = parseCheck(r), vm = url.searchParams.get('vm');
     const gap = r.category === 'Business' ? gapReport(r) : null;
     const gapHtml = gap
       ? `<div class="card"><div class="p"><b>Content gap analysis (0 token)</b> <span class="tag">${gap.needed ? gap.gaps.length + ' kami' : 'detailed'}</span><p class="m">${gap.words} shabd &middot; ${gap.headings} sections &middot; depth score ${gap.score}/100</p>${gap.needed ? `<ul>${gap.gaps.map((g) => `<li>${esc(g.msg)}</li>`).join('')}</ul>` : '<p class="m">Setup, money engine, framework, worked example, counterpoint, playbook, risks, result, honesty aur analysis — sab maujood hain.</p>'}${r.status === 'draft' ? `<form method="post" action="/admin/post/${id}/deepen"><button class="g">Deepen karo: fresh sources + full detail + example + result (AI, 2-3 min)</button></form><p class="m">Ye draft ko expand karta hai, phir fact-check dobara chalta hai. Publish tabhi hoga jab tum approve karo.</p>` : `<p class="m">Live/approved post ko yahan se deepen nahi karte. Pehle "Back to draft" dabao, phir deepen chalao, phir dobara approve karo.</p>`}</div></div>`
@@ -948,12 +948,18 @@ ${msg ? `<p class="note">${esc(msg)}</p>` : ''}
       ? `<ul>${unc.map((x) => `<li>${esc(x.text)}${x.detail ? ` <span class="m">(${esc(x.detail)})</span>` : ''}</li>`).join('')}</ul>`
       : '<p class="m">Sab kuch confirm hua (koi unconfirmed item nahi).</p>';
     const q = ck && ck.quality;
+    const trustHtml = ck && ck.sourceTrust
+      ? `<p class="m">Source trust: ${esc(ck.sourceTrust.text || `${ck.sourceTrust.score}/100 (${ck.sourceTrust.level})`)}${ck.sourceTrust.weakest && ck.sourceTrust.weakest.host ? ` &middot; weakest: ${esc(ck.sourceTrust.weakest.host)}` : ''}</p>`
+      : '';
     const qHtml = q ? `<p class="m">Quality: originality ${ck.originality ? Math.round((ck.originality.score || 0) * 100) + '%' : '-'} &middot; specificity ${ck.specificity ? ck.specificity.score + '/100 (' + ck.specificity.per100 + ' details/100 shabd)' : '-'} &middot; site-voice ${ck.voice ? (ck.voice.compared ? ck.voice.score + '/100' : 'n/a (3+ approved posts chahiye)') : '-'}${q.penalty ? ` &middot; <b>${q.penalty} points kate</b>` : ' &middot; 0 points kate'}</p>` : '';
     const staleHtml = stale.length
       ? `<div class="note">${stale.length} fact 24 ghante se re-check nahi hue (official number badal sakta hai). Sources dobara padh kar confirm karo: <form method="post" action="${act}" style="display:inline"><input type="hidden" name="a" value="facts_ok"><button class="o" style="width:auto;padding:4px 10px">Facts aaj verify kiye</button></form><br><span class="m">${stale.slice(0, 3).map((f) => esc(f.text)).join(' | ')}</span></div>`
       : '';
-    const checkBlock = `<div class="card"><div class="p"><b>Publish se pehle jaanch</b>${vm ? `<p class="note">${esc(vm)}</p>` : ''}${li(vr.errors, '&#10060;', 'background:#fdecea;border-color:#f5c2c0')}${li(vr.warnings, '&#9888;&#65039;')}${vr.errors.length || vr.warnings.length ? '' : '<p class="m">Sab jaanch theek hain.</p>'}`
-      + `${ck ? `<p class="m">Fact-check: ${ck.supported}/${ck.claims} claims ka sabut sources mein mila, ${ck.fixRounds || 0} baar sudhaara gaya, copy overlap ${((ck.overlap || 0) * 100).toFixed(0)}%${ck.numbersNotInSources && ck.numbersNotInSources.length ? ' | sankhya sources mein nahi: ' + esc(ck.numbersNotInSources.join(', ')) : ''}${ck.latinNotInSources && ck.latinNotInSources.length ? ' | English naam sources mein nahi: ' + esc(ck.latinNotInSources.join(', ')) : ''}</p>${claimRows ? `<details><summary>Kya check hua (claim + sabut)</summary><ul>${claimRows}</ul></details>` : ''}` : '<p class="m">Is post ka fact-check record nahi hai.</p>'}${ck && (ck.style || ck.debate) ? `<p class="m">Style guard: ${ck.style ? `${ck.style.score}/100${ck.style.penalty ? ` (${ck.style.penalty} points kate: ${esc((ck.style.notes || []).slice(0, 3).join('; '))})` : ''}` : 'n/a'}${ck.debate ? ` | Multi-AI debate: ${(ck.debate.stats && ck.debate.stats.verified) || 0} verified, ${(ck.debate.stats && ck.debate.stats.conflict) || 0} conflict claims` : ''}</p>` : ''}${qHtml}${staleHtml}<details${unc.length ? ' open' : ''}><summary>Kya confirm nahi hai (${unc.length})</summary>${uncHtml}</details>${ck && ck.source_check ? `<p class="m">Last source check: ${ck.source_check.okCount}/${ck.source_check.checked} live${(ck.source_check.dead || []).length ? ' | dead: ' + esc((ck.source_check.dead || []).join(', ')) : ''}</p>` : ''}</div></div>`;
+    const bizHint = r.category === 'Business' && r.status === 'draft' && !vr.ok
+      ? '<p class="note">Ye draft publish-ready nahi hai. Upar <b>Content gap analysis → Deepen</b> chalao, ya <b>Reject</b> karke naya likho. Red force button se unsupported numbers live ho jayenge.</p>'
+      : '';
+    const checkBlock = `<div class="card"><div class="p"><b>Publish se pehle jaanch</b>${vm ? `<p class="note">${esc(vm)}</p>` : ''}${bizHint}${li(vr.errors, '&#10060;', 'background:#fdecea;border-color:#f5c2c0')}${li(vr.warnings, '&#9888;&#65039;')}${vr.errors.length || vr.warnings.length ? '' : '<p class="m">Sab jaanch theek hain.</p>'}`
+      + `${ck ? `<p class="m">Fact-check: ${ck.supported}/${ck.claims} claims ka sabut sources mein mila, ${ck.fixRounds || 0} baar sudhaara gaya, copy overlap ${((ck.overlap || 0) * 100).toFixed(0)}%${ck.numbersNotInSources && ck.numbersNotInSources.length ? ' | sankhya sources mein nahi: ' + esc(ck.numbersNotInSources.join(', ')) : ''}${ck.latinNotInSources && ck.latinNotInSources.length ? ' | English naam sources mein nahi: ' + esc(ck.latinNotInSources.join(', ')) : ''}</p>${trustHtml}${claimRows ? `<details><summary>Kya check hua (claim + sabut)</summary><ul>${claimRows}</ul></details>` : ''}` : '<p class="m">Is post ka fact-check record nahi hai.</p>'}${ck && (ck.style || ck.debate) ? `<p class="m">Style guard: ${ck.style ? `${ck.style.score}/100${ck.style.penalty ? ` (${ck.style.penalty} points kate: ${esc((ck.style.notes || []).slice(0, 3).join('; '))})` : ''}` : 'n/a'}${ck.debate ? ` | Multi-AI debate: ${(ck.debate.stats && ck.debate.stats.verified) || 0} verified, ${(ck.debate.stats && ck.debate.stats.conflict) || 0} conflict claims` : ''}</p>` : ''}${qHtml}${staleHtml}<details${unc.length ? ' open' : ''}><summary>Kya confirm nahi hai (${unc.length})</summary>${uncHtml}</details>${ck && ck.source_check ? `<p class="m">Last source check: ${ck.source_check.okCount}/${ck.source_check.checked} live${(ck.source_check.dead || []).length ? ' | dead: ' + esc((ck.source_check.dead || []).join(', ')) : ''}</p>` : ''}</div></div>`;
     const humanBlock = `<div class="card"><div class="p"><b>Human check + edit (ye step AI se nahi hota)</b>${r.human_edited_at ? `<p class="note">Human check darj: ${day(r.human_edited_at)} &middot; ${esc(r.human_edit_note || '')}</p>` : '<p class="note">Abhi tak koi insaan ne is draft ko check/edit nahi kiya. Neeche wala form bharo - iske bina normal approve nahi chalega.</p>'}
 <form method="post" action="${act}"><input type="hidden" name="a" value="human_approve">
 <label class="m">Poora article (yahan seedha edit karo; 200+ akshar ka change bhi gate pass karta hai)</label><textarea name="body" rows="14">${esc(r.body)}</textarea>

@@ -17,6 +17,7 @@
 import { runAI } from './ai.js';
 import { groundedCheck, numbersNotIn, latinNotIn } from './verify.js';
 import { derivedNumbers } from './business.js';
+import { annotateSources, trustSummary, trustText } from './sourcetrust.js';
 
 const countWords = (s) => String(s || '').split(/\s+/).filter(Boolean).length;
 
@@ -101,9 +102,10 @@ export function businessEditorMessages(env, article, sources, feedback = '', opt
   const lang = opts.lang === 'hi' ? 'hi' : 'en';
   const langName = lang === 'en' ? 'English' : 'Hindi (Devanagari script)';
   const hostOf = (u) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return ''; } };
-  const srcBlock = sources
-    .slice(0, 6)
-    .map((s, i) => `[${i + 1}] ${s.title || hostOf(s.url) || 'source'}${hostOf(s.url) ? ' (' + hostOf(s.url) + ')' : ''}${s.date ? ' - ' + new Date(s.date * 1000).toISOString().slice(0, 10) : ''}\n${String(s.text || '').slice(0, 2000)}`)
+  const editorSources = annotateSources(sources).slice(0, 6);
+  const trust = trustSummary(editorSources);
+  const srcBlock = editorSources
+    .map((s, i) => `[${i + 1}] ${s.title || hostOf(s.url) || 'source'}${hostOf(s.url) ? ' (' + hostOf(s.url) + ')' : ''}${s.trust ? ' [trust: ' + s.trust.label + ']' : ''}${s.date ? ' - ' + new Date(s.date * 1000).toISOString().slice(0, 10) : ''}\n${String(s.text || '').slice(0, 2000)}`)
     .join('\n\n');
 
   const system =
@@ -113,11 +115,14 @@ export function businessEditorMessages(env, article, sources, feedback = '', opt
     'A calculation is allowed only when it is written as `A / B = C` or `A - B = C`, A and B appear in the sources, ' +
     'and the arithmetic is correct. Label every estimate with the word estimate and show its sourced inputs. ' +
     'Never write guarantees, get-rich promises, stock tips, buy/sell advice or target prices. ' +
+    'Source trust order: official/regulator/exchange filing > financial press > general press > company claim > blog/social/aggregator. ' +
+    'If a claim appears only on a blog, forum or unknown site, attribute it or remove it; never use Wikipedia or an aggregator as the only proof of a number. ' +
+    'If credible sources conflict, keep the conflict visible ("reports differ"). ' +
     'Your analysis may connect facts and apply a framework, but it must not present opinions or predictions as facts.';
 
   const user =
     `TITLE: ${article.title || ''}\nSUMMARY: ${article.summary || ''}\n\nDRAFT BODY:\n${article.body || ''}\n\n` +
-    `SOURCES:\n${srcBlock}\n\n` +
+    `SOURCE TRUST: ${trustText(trust)}\nSOURCES:\n${srcBlock}\n\n` +
     'Task 1 - EDIT the draft:\n' +
     `- Keep it ${langName}, 1200 to 1600 words, 8 to 10 sub-headings written as lines starting with ##\n` +
     '- The article must keep these sections: a plain-language setup (assume the reader only saw a headline), the money engine, ' +

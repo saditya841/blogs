@@ -32,6 +32,7 @@ import { originality } from './originality.js';
 import { specificity, specificityMeta } from './specificity.js';
 import { loadVoiceProfile, voiceCheck, voiceMeta } from './voice.js';
 import { saveFacts, linkPostFacts } from './factregistry.js';
+import { trustMeta, trustSummary } from './sourcetrust.js';
 import {
   BUSINESS_ROLES, businessAngle, businessGate, businessMessages, businessMeta,
   derivedNumbers, frameworkFor, isBusinessMode
@@ -245,6 +246,9 @@ export async function writeOne(env, opts = {}) {
   if (!topic) return { ok: false, reason: why || 'Koi kaam ka topic nahi mila', spent: false };
 
   const business = isBusinessMode(env, topic, research);
+  // Domain-level trust: official/regulator > financial press > general press > reference > blog.
+  // This is not a truth verdict; it tells the reviewer where the proof came from.
+  const sourceTrustSummary = trustSummary(sources);
   const lang = opts.lang === 'hi' ? 'hi' : opts.lang === 'en' ? 'en' : (research.lang === 'hi' ? 'hi' : research.lang === 'en' ? 'en' : (business ? String(env.BUSINESS_LANG || 'en') : langOf(env)));
   const angle = business ? businessAngle(topic.query, research) : '';
   const fwId = business ? frameworkFor(topic.query, research) : '';
@@ -532,6 +536,13 @@ export async function writeOne(env, opts = {}) {
     for (const w of (businessResult.warnings || []).slice(0, 4)) unconfirmed.push({ kind: 'business', text: w.msg, detail: '' });
     for (const e of (businessResult.errors || []).slice(0, 3)) unconfirmed.push({ kind: 'business', text: e.msg, detail: 'Publish se pehle theek karo' });
   }
+  if (sourceTrustSummary.level === 'weak') {
+    unconfirmed.push({
+      kind: 'source',
+      text: `Sources ki trust weak hai (${sourceTrustSummary.score}/100): official filing ya financial press se cross-check karo`,
+      detail: (sourceTrustSummary.strongest && sourceTrustSummary.strongest.host) || ''
+    });
+  }
   const unconfirmedFinal = unconfirmed.slice(0, 12);
 
   // ---- 7. save draft + mark topic, in ONE atomic batch ----
@@ -554,6 +565,7 @@ export async function writeOne(env, opts = {}) {
       newest_source: newestSource,
       lang,
       business: businessMeta(businessResult),
+      sourceTrust: trustMeta(sourceTrustSummary),
       preread: prereadMeta,
       style: styleMeta(style),
       originality: { score: orig.score, copied: orig.copied, total: orig.total, penalty: orig.penalty, notes: (orig.notes || []).slice(0, 4) },
@@ -638,6 +650,7 @@ export async function writeOne(env, opts = {}) {
     business: business ? { ok: !!businessResult?.ok, score: businessResult?.score || 0, angle, framework: fwId, example: !!businessResult?.hasExample, result: !!businessResult?.hasResult, errors: (businessResult?.errors || []).map((e) => e.msg) } : null,
     businessScore: businessResult ? businessResult.score : null,
     businessOk: businessResult ? !!businessResult.ok : null,
+    sourceTrust: trustMeta(sourceTrustSummary),
     lang,
     duplicateChecked: duplicateInfo.checked,
     debateVerified: (debateMetaObj && debateMetaObj.stats && debateMetaObj.stats.verified) || 0,

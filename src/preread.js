@@ -12,6 +12,7 @@
 
 import { tok, numbersIn, looksInjected } from './verify.js';
 import { extractFacts, splitSentences } from './facts.js';
+import { sortByTrust, trustSummary, trustText } from './sourcetrust.js';
 
 const DAY = 86400;
 const now = () => Math.floor(Date.now() / 1000);
@@ -106,6 +107,7 @@ function briefText(b) {
   const lines = [];
   lines.push(`TOPIC: ${b.query}`);
   lines.push(`PRE-READ: ${b.stats.usable} usable source(s), ${b.stats.fullText} with full article text, ${b.stats.facts} facts (${b.stats.agreed} agreed by 2+ outlets), language ${b.lang}${b.mixed ? ' + fallback' : ''}, newest source ${b.stats.newestAgeHours == null ? 'unknown' : b.stats.newestAgeHours + 'h old'}.`);
+  if (b.trust) lines.push(`SOURCE TRUST: ${trustText(b.trust)}. Official/financial sources first; blog/social/unknown is not proof.`);
   lines.push('');
   const agreed = b.facts.filter((f) => (f.agree || 0) >= 2);
   const single = b.facts.filter((f) => (f.agree || 0) < 2);
@@ -203,6 +205,14 @@ export function buildBrief(topic, sources, opts = {}) {
   if (!names.length && preferred === 'en') gaps.push('sources me koi naam nahi mila');
   if (/\b(score|result|standings|points table)\b/i.test(query) && !/\b\d+\s*[-–:]\s*\d+\b/.test(notes)) gaps.push('score/result sources me nahi hai');
 
+  // Source trust is computed here so every caller (writer, deepen, admin) sees the same ranking.
+  const briefSources = sortByTrust(relevant.map((s) => ({
+    source: s.source, title: s.title, url: s.url, snippet: s.snippet,
+    text: (s.text || s.snippet).slice(0, 2500), date: s.date,
+    lang: s.lang, relevance: s.rel, full: s.full
+  })));
+  const trust = trustSummary(briefSources);
+
   const stats = {
     total: raw.length,
     usable: relevant.length,
@@ -213,6 +223,9 @@ export function buildBrief(topic, sources, opts = {}) {
     agreed: factsOut.agreed,
     newestAt: newest || null,
     newestAgeHours: newestAgeDays == null ? null : round(newestAgeDays * 24, 1),
+    trustScore: trust.score,
+    trustLevel: trust.level,
+    independentSources: trust.independent,
   };
 
   let reason = '';
@@ -249,11 +262,8 @@ export function buildBrief(topic, sources, opts = {}) {
     dates: dateList,
     names,
     gaps,
-    sources: relevant.map((s) => ({
-      source: s.source, title: s.title, url: s.url, snippet: s.snippet,
-      text: (s.text || s.snippet).slice(0, 2500), date: s.date,
-      lang: s.lang, relevance: s.rel, full: s.full
-    })),
+    trust,
+    sources: briefSources,
     dropped,
     briefText: ''
   };

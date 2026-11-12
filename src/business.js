@@ -13,6 +13,7 @@
 // AI kabhi `verified` set nahi karta. Code karta hai.
 
 import { numbersIn, normNums } from './verify.js';
+import { annotateSources, trustSummary, trustText } from './sourcetrust.js';
 
 const lower = (s) => String(s || '').toLowerCase();
 
@@ -24,6 +25,7 @@ const lower = (s) => String(s || '').toLowerCase();
 // money", "why do restaurants fail") that keep bringing readers long after a news cycle ends.
 // Every query must also exist in BUSINESS_TOPIC_BANK so research/angle/framework stay consistent.
 export const BUSINESS_HOT_QUERIES = [
+  // Company / business-model explainers
   'DMart business model low margin high volume',
   'Zerodha business model revenue profit',
   'quick commerce dark store economics India',
@@ -43,7 +45,45 @@ export const BUSINESS_HOT_QUERIES = [
   'gym business model retention India',
   'cloud kitchen economics India',
   'cold storage business economics India',
-  'UPI payments economics banks merchants'
+  'UPI payments economics banks merchants',
+
+  // Share-market education (no tips, no target prices)
+  'stock market basics India how shares work',
+  'sensex nifty explained for beginners India',
+  'IPO process India how listing works',
+  'mutual fund vs index fund India expense ratio',
+  'share market risk diversification India explained',
+  'PE ratio explained India stock valuation',
+  'market cap large cap mid cap small cap India',
+  'FII DII flows stock market India impact',
+  'demat account charges India comparison',
+  'dividend vs buyback India shareholder return',
+
+  // New business plans / startup cost (break-even math, not "guaranteed profit")
+  'coffee shop startup cost India break-even',
+  'kirana store startup cost India profit',
+  'laundry business startup cost India profit',
+  'tiffin service business plan India profit',
+  'digital marketing agency startup cost India',
+  'franchise vs own business India cost',
+  'EV charging station investment India payback',
+  'PG hostel business India cost profit',
+  'cloud kitchen startup cost India',
+  'gym startup cost India break-even',
+
+  // Successful businessmen / founder case studies (dated timeline, no fake quotes)
+  'Dhirubhai Ambani early business lessons Reliance',
+  'Narayana Murthy Infosys founding story lessons',
+  'Ratan Tata acquisition strategy lessons',
+  'Falguni Nayar Nykaa startup lessons',
+  'Radhakishan Damani DMart journey lessons',
+  'Kishore Biyani Future Group rise fall lessons',
+  'Vijay Shekhar Sharma Paytm lessons',
+  'Azim Premji Wipro strategy lessons',
+  'Ritesh Agarwal OYO business model lessons',
+  'Deepinder Goyal Zomato strategy lessons',
+  'Nikhil Kamath Zerodha lessons',
+  'Verghese Kurien Amul leadership lessons'
 ];
 
 // Rotate through the hot list so the same topic is not collected every day.
@@ -108,6 +148,70 @@ export const BUSINESS_TOPIC_BANK = [
   { q: 'OpenAI business model costs revenue', angle: 'model', framework: 'unit-economics' },
   { q: 'Reliance retail expansion economics', angle: 'model', framework: 'unit-economics' },
   { q: 'Tata group acquisition strategy', angle: 'case-study', framework: 'portfolio' },
+
+  // ---- Share-market education: concept + risk + costs, never a buy/sell call ----
+  { q: 'stock market basics India how shares work', angle: 'education', framework: 'base-rate' },
+  { q: 'sensex nifty explained for beginners India', angle: 'education', framework: 'base-rate' },
+  { q: 'IPO process India how listing works', angle: 'model', framework: 'unit-economics' },
+  { q: 'mutual fund vs index fund India expense ratio', angle: 'unit-economics', framework: 'unit-economics' },
+  { q: 'share market risk diversification India explained', angle: 'education', framework: 'portfolio' },
+  { q: 'PE ratio explained India stock valuation', angle: 'education', framework: 'pricing' },
+  { q: 'SEBI role stock market regulation India', angle: 'regulation', framework: 'porter' },
+  { q: 'market cap large cap mid cap small cap India', angle: 'education', framework: 'base-rate' },
+  { q: 'bonus issue stock split buyback India explained', angle: 'education', framework: 'portfolio' },
+  { q: 'FII DII flows stock market India impact', angle: 'model', framework: 'second-order' },
+  { q: 'circuit breaker stock market India explained', angle: 'regulation', framework: 'second-order' },
+  { q: 'demat account charges India comparison', angle: 'pricing', framework: 'unit-economics' },
+  { q: 'dividend vs buyback India shareholder return', angle: 'education', framework: 'portfolio' },
+  { q: 'delivery percentage stock market India meaning', angle: 'education', framework: 'base-rate' },
+
+  // ---- New business plans: startup cost, monthly fixed cost, break-even, downside ----
+  { q: 'coffee shop startup cost India break-even', angle: 'break-even', framework: 'break-even' },
+  { q: 'kirana store startup cost India profit', angle: 'break-even', framework: 'break-even' },
+  { q: 'laundry business startup cost India profit', angle: 'break-even', framework: 'break-even' },
+  { q: 'tiffin service business plan India profit', angle: 'unit-economics', framework: 'unit-economics' },
+  { q: 'digital marketing agency startup cost India', angle: 'unit-economics', framework: 'unit-economics' },
+  { q: 'franchise vs own business India cost', angle: 'model', framework: 'break-even' },
+  { q: 'online reselling business India margin', angle: 'unit-economics', framework: 'unit-economics' },
+  { q: 'solar panel installation business India cost', angle: 'break-even', framework: 'break-even' },
+  { q: 'EV charging station investment India payback', angle: 'unit-economics', framework: 'break-even' },
+  { q: 'PG hostel business India cost profit', angle: 'cash', framework: 'break-even' },
+  { q: 'tailoring boutique business India cost', angle: 'break-even', framework: 'break-even' },
+  { q: 'nursery business India profit cost', angle: 'unit-economics', framework: 'break-even' },
+  { q: 'cloud kitchen startup cost India', angle: 'unit-economics', framework: 'break-even' },
+  { q: 'gym startup cost India break-even', angle: 'unit-economics', framework: 'break-even' },
+  { q: 'pharmacy business India margin license', angle: 'unit-economics', framework: 'unit-economics' },
+  { q: 'stationery shop business India margin', angle: 'unit-economics', framework: 'unit-economics' },
+  { q: 'car wash business India cost profit', angle: 'unit-economics', framework: 'break-even' },
+  { q: 'petrol pump dealership investment India', angle: 'cash', framework: 'break-even' },
+  { q: 'day care creche business plan India', angle: 'unit-economics', framework: 'break-even' },
+  { q: 'small manufacturing business India cost', angle: 'operations', framework: 'lean' },
+
+  // ---- Successful businessmen: dated timeline, decisions, outcome, survivorship bias ----
+  { q: 'Dhirubhai Ambani early business lessons Reliance', angle: 'case-study', framework: 'portfolio' },
+  { q: 'Narayana Murthy Infosys founding story lessons', angle: 'case-study', framework: 'base-rate' },
+  { q: 'Ratan Tata acquisition strategy lessons', angle: 'case-study', framework: 'portfolio' },
+  { q: 'Karsanbhai Patel Nirma business story lessons', angle: 'case-study', framework: 'pricing' },
+  { q: 'Verghese Kurien Amul leadership lessons', angle: 'case-study', framework: 'flywheel' },
+  { q: 'Sunil Mittal Bharti Airtel early strategy lessons', angle: 'case-study', framework: 'second-order' },
+  { q: 'Uday Kotak Kotak Mahindra founding lessons', angle: 'case-study', framework: 'unit-economics' },
+  { q: 'Falguni Nayar Nykaa startup lessons', angle: 'case-study', framework: 'unit-economics' },
+  { q: 'Radhakishan Damani DMart journey lessons', angle: 'case-study', framework: 'unit-economics' },
+  { q: 'Kishore Biyani Future Group rise fall lessons', angle: 'failure', framework: 'inversion' },
+  { q: 'Bhavish Aggarwal Ola strategy lessons', angle: 'case-study', framework: 'second-order' },
+  { q: 'Vijay Shekhar Sharma Paytm lessons', angle: 'case-study', framework: 'inversion' },
+  { q: 'Azim Premji Wipro strategy lessons', angle: 'case-study', framework: 'portfolio' },
+  { q: 'Shiv Nadar HCL founding lessons', angle: 'case-study', framework: 'moat' },
+  { q: 'Anand Mahindra Mahindra strategy lessons', angle: 'case-study', framework: 'portfolio' },
+  { q: 'Gautam Adani infrastructure strategy lessons', angle: 'case-study', framework: 'second-order' },
+  { q: 'Ritesh Agarwal OYO business model lessons', angle: 'case-study', framework: 'flywheel' },
+  { q: 'Sachin Bansal Binny Bansal Flipkart lessons', angle: 'case-study', framework: 'flywheel' },
+  { q: 'Deepinder Goyal Zomato strategy lessons', angle: 'case-study', framework: 'flywheel' },
+  { q: 'Nikhil Kamath Zerodha lessons', angle: 'case-study', framework: 'unit-economics' },
+  { q: 'Warren Buffett investment principles lessons', angle: 'case-study', framework: 'base-rate' },
+  { q: 'Steve Jobs Apple product strategy lessons', angle: 'case-study', framework: 'moat' },
+  { q: 'Jeff Bezos Amazon long term thinking lessons', angle: 'case-study', framework: 'flywheel' },
+  { q: 'Elon Musk Tesla cost strategy lessons', angle: 'case-study', framework: 'lean' }
 ];
 
 export const BUSINESS_FRAMEWORKS = {
@@ -206,6 +310,11 @@ export const BUSINESS_ROLES = [
     id: 'skeptic',
     name: 'Skeptic',
     focus: 'Base rate, failure modes, missing data, contradictions aur survivorship bias. Sabse strong ulta argument.'
+  },
+  {
+    id: 'verifier',
+    name: 'Source Verifier',
+    focus: 'Source provenance aur real-vs-fake: official filing, financial press, company claim ya blog? Dates, conflicts, aur kya koi claim sirf low-trust site par hai.'
   }
 ];
 
@@ -258,6 +367,97 @@ export function frameworkFor(query, research) {
   return 'unit-economics';
 }
 
+// ---------------------------------------------------------------------------
+// 2b. What kind of business article is this?
+// ---------------------------------------------------------------------------
+// The same 10-section depth contract applies, but the evidence rules are different:
+//  * market  -> teach a concept, never a buy/sell/target-price call,
+//  * plan    -> startup cost + monthly fixed cost + break-even + downside case,
+//  * founder -> dated timeline, no invented quotes, survivorship bias admitted,
+//  * model   -> the existing unit-economics/cash-engine explainer.
+const MARKET_RE = /\b(share ?market|stock ?market|sensex|nifty|ipo|mutual fund|index fund|demat|sebi|pe ratio|p\/e|dividend|bonus issue|stock split|buyback|circuit breaker|fii|dii|market cap|stock valuation|delivery percentage|trading|investor)\b/i;
+const FOUNDER_RE = /\b(founder|founded|founding|co-?founder|success story|successful businessman|business journey|leadership lessons|early business lessons|founding story)\b/i;
+const MODEL_RE = /\b(business model|revenue model|unit economics|how .+ makes money|economics|moat|working capital|cash ?flow)\b/i;
+const PLAN_RE = /\b(startup|start[- ]?up|business plan|capital required|investment|break[- ]?even|franchise|dealership|agency|shop|store|hostel|manufactur|business idea|profit|cost|how much to invest|payback|licen[cs]e|margin)\b/i;
+const FOUNDER_NAMES = [
+  'dhirubhai ambani', 'mukesh ambani', 'narayana murthy', 'ratan tata', 'karsanbhai patel',
+  'verghese kurien', 'sunil mittal', 'uday kotak', 'falguni nayar', 'radhakishan damani',
+  'kishore biyani', 'bhavish aggarwal', 'vijay shekhar sharma', 'azim premji', 'shiv nadar',
+  'anand mahindra', 'gautam adani', 'ritesh agarwal', 'sachin bansal', 'binny bansal',
+  'deepinder goyal', 'nikhil kamath', 'kumar mangalam birla', 'warren buffett', 'steve jobs',
+  'jeff bezos', 'elon musk', 'bill gates', 'ray dalio', 'sam altman'
+];
+
+export const BUSINESS_KINDS = {
+  market: {
+    label: 'Share-market education',
+    section: 'Teach one concept, its costs and its risk. The reader must be able to explain it to a friend after reading.'
+  },
+  plan: {
+    label: 'New business plan',
+    section: 'Show the startup cost, monthly fixed cost, contribution per unit and break-even. Then show a bad month.'
+  },
+  founder: {
+    label: 'Businessman case study',
+    section: 'Build a dated timeline of decisions and outcomes. Separate the founder claim from independent reporting.'
+  },
+  model: {
+    label: 'Company / model explainer',
+    section: 'Explain who pays whom, the unit economics, the moat and where the model breaks.'
+  }
+};
+
+export function businessKind(query, research) {
+  const r = research || {};
+  if (r.kind && BUSINESS_KINDS[r.kind]) return r.kind;
+  const q = lower(query);
+  if (MARKET_RE.test(q)) return 'market';
+  if (FOUNDER_RE.test(q) || FOUNDER_NAMES.some((n) => q.includes(n))) return 'founder';
+  if (MODEL_RE.test(q)) return 'model';
+  if (PLAN_RE.test(q)) return 'plan';
+  return 'model';
+}
+
+// Evidence rules that go into the prompt. These are hard editorial rules, not suggestions.
+export function kindRules(kind) {
+  if (kind === 'market') {
+    return [
+      'KIND: market education. Never give a buy/sell/hold call, target price, "multibagger" label, or a prediction.',
+      'Explain what the instrument/index/ratio is, how it is calculated (if relevant), what it costs, and who bears the risk.',
+      'Include one worked example with sourced numbers. If the source gives no numbers, use a clearly labelled illustrative example and say so.',
+      'Name at least two risks: price volatility, liquidity, fees/taxes, concentration, inflation, or behaviour risk.',
+      'State plainly that past returns do not guarantee future returns, and that this is education, not investment advice.',
+      'If two credible sources disagree, write "reports differ" and show both versions instead of picking one.'
+    ].join('\n');
+  }
+  if (kind === 'plan') {
+    return [
+      'KIND: new business plan. The reader wants to know what it costs to start and when it stops losing money.',
+      'Give a prose startup-cost breakdown: deposit/rent, equipment, interiors, licences, initial inventory, marketing and working capital.',
+      'Give monthly fixed cost, contribution per order/customer, and break-even in units and months. Label every assumption as an estimate.',
+      'Add a downside case: what happens if demand is 30% lower or costs are 20% higher? Do not promise profit.',
+      'Name the licence/registration/permission the plan actually needs, and what happens if it is delayed.',
+      'Add 3 to 5 validation steps a reader can do before spending money (locality survey, pre-orders, trial menu, supplier quote).'
+    ].join('\n');
+  }
+  if (kind === 'founder') {
+    return [
+      'KIND: businessman case study. Build a dated timeline from the sources: year, decision, money, outcome.',
+      'Separate what the founder/company says from what independent reporting or filings show. Never invent a quote or a dialogue.',
+      'Do not turn one success into a formula. Add the survivorship-bias counterpoint: how many similar businesses failed, and why this case may not repeat.',
+      'Name one decision that looked wrong at the time and explain what actually happened. If the sources do not say, write "not confirmed".',
+      'Include the present-day result (revenue, market share, decline, exit) only if sourced. Otherwise say the result is not known from the sources.',
+      'Respect privacy and defamation: no personal attacks, no unproven allegations, no words put in a real person\'s mouth.'
+    ].join('\n');
+  }
+  return [
+    'KIND: company/model explainer. Explain who pays whom, revenue, costs, margins and cash.',
+    'Name the moat (if any), the strongest competitor response, and the exact point where the model breaks.',
+    'Use a sourced worked example. If a number is an estimate, label it and show the inputs.',
+    'Add the operator view: what a small business can copy, and what it should not copy.'
+  ].join('\n');
+}
+
 export function businessSeeds({ limit = 6, offset = 0 } = {}) {
   const n = BUSINESS_TOPIC_BANK.length;
   const start = ((Number(offset) || 0) % n + n) % n;
@@ -281,10 +481,18 @@ export function businessMessages(env, opts = {}) {
   const angle = businessAngle(topic, research);
   const fwId = frameworkFor(topic, research);
   const fw = BUSINESS_FRAMEWORKS[fwId] || BUSINESS_FRAMEWORKS['unit-economics'];
-  const sources = (opts.sources || []).slice(0, 6);
+  const kind = businessKind(topic, research);
+  const kindConf = BUSINESS_KINDS[kind] || BUSINESS_KINDS.model;
   const hostOf = (u) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return ''; } };
+  // Trusted sources first: official filing -> financial press -> general press -> reference -> blog.
+  const sources = annotateSources(opts.sources || [])
+    .map((s, i) => ({ s, i }))
+    .sort((a, b) => (b.s.trust.score - a.s.trust.score) || (a.i - b.i))
+    .map((x) => x.s)
+    .slice(0, 6);
+  const trust = trustSummary(sources);
   const srcBlock = sources
-    .map((s, i) => `[${i + 1}] ${s.title || hostOf(s.url) || 'source'}${hostOf(s.url) ? ' (' + hostOf(s.url) + ')' : ''}${s.date ? ' - ' + new Date(s.date * 1000).toISOString().slice(0, 10) : ''}\n${String(s.text || s.snippet || '').slice(0, 2200)}`)
+    .map((s, i) => `[${i + 1}] ${s.title || hostOf(s.url) || 'source'}${hostOf(s.url) ? ' (' + hostOf(s.url) + ')' : ''}${s.trust ? ' [trust: ' + s.trust.label + ']' : ''}${s.date ? ' - ' + new Date(s.date * 1000).toISOString().slice(0, 10) : ''}\n${String(s.text || s.snippet || '').slice(0, 2200)}`)
     .join('\n\n');
   const briefBlock = opts.brief && opts.brief.briefText
     ? `READING BRIEF (already checked by code; trust its numbers):\n${String(opts.brief.briefText).slice(0, 2600)}\n\n`
@@ -310,6 +518,8 @@ export function businessMessages(env, opts = {}) {
     '- If a fact is missing, write that it is not confirmed instead of filling the gap.\n' +
     '- Never write "guaranteed", "risk-free", "sure shot", "100% profit", "double your money" or any get-rich promise.\n' +
     '- Never give stock tips: no buy/sell recommendation, no target price, no multibagger call. Business analysis is fine, investment advice is not.\n' +
+    '- Source trust order: official/regulator/exchange filing > financial press > general press > company claim > blog/social/aggregator. If a fact appears only on a blog, forum or unknown site, attribute it ("ek blog ke mutabik") or leave it out. Never use Wikipedia or an aggregator as the only proof of a number.\n' +
+    '- If two credible sources conflict, write "reports differ" and show both versions. Do not silently pick the convenient one.\n' +
     '- Never put words in a real person\'s mouth. Quote only if the exact words are in the sources.\n' +
     '- The reader may have only seen a news headline. Explain the context and every technical term in plain language before you use it.\n' +
     '- Include one worked example and one result/outcome section. If the sources do not contain a real result, say the result is not known yet and explain what evidence would settle it.\n' +
@@ -324,10 +534,12 @@ export function businessMessages(env, opts = {}) {
     '- what would have to be true for this to work;\n' +
     '- what could go wrong, and the early signal that it is going wrong;\n' +
     '- what actually happened (result/outcome) and what it implies;\n' +
-    '- what a small operator should test first, and what is still not confirmed.';
+    '- what a small operator should test first, and what is still not confirmed.\n\n' +
+    `ARTICLE KIND: ${kindConf.label}\n${kindConf.section}\n` +
+    `KIND-SPECIFIC EVIDENCE RULES (follow every line):\n${kindRules(kind)}`;
 
   const user =
-    `DATE: ${today}\nTOPIC: ${topic}\nANGLE: ${angle}\nFRAMEWORK TO APPLY: ${fw.name}\nFRAMEWORK IDEA: ${fw.idea}\nASK YOURSELF: ${fw.ask}\nLANGUAGE: ${LANG}\n\n` +
+    `DATE: ${today}\nTOPIC: ${topic}\nKIND: ${kind} (${kindConf.label})\nANGLE: ${angle}\nFRAMEWORK TO APPLY: ${fw.name}\nFRAMEWORK IDEA: ${fw.idea}\nASK YOURSELF: ${fw.ask}\nLANGUAGE: ${LANG}\nSOURCE TRUST: ${trustText(trust)}\n\n` +
     (existing ? `EXISTING ARTICLE TO DEEPEN (same story; keep correct facts, remove filler, explain jargon, add a worked example and a result section):\n${existing}\n\n` : '') +
     `${briefBlock}${ledgerBlock}SOURCES:\n${srcBlock}\n\n` +
     `Write a deep business article in ${LANG}. It must read like a real publication, not a listicle and not a press release.\n\n` +
@@ -342,6 +554,7 @@ export function businessMessages(env, opts = {}) {
     '8. ## What the result shows — what actually happened or what the sourced numbers imply. If the result is not known yet, say so and explain what would prove it.\n' +
     '9. ## What is not confirmed — missing data, single-source claims, estimates, and what evidence would change the conclusion.\n' +
     '10. ## Analysis — what this means, why it matters, and the one thing to remember. Do not repeat the intro.\n\n' +
+    `STRUCTURE FOCUS FOR THIS KIND: ${kindConf.section}\n\n` +
     'LENGTH: 1200 to 1600 words. Each heading should have 2 to 4 short paragraphs. Vary sentence length. Use Indian examples and rupee/crore where the sources support it.\n\n' +
     'QUALITY BAR:\n' +
     '- The article must be understandable to a reader who has only seen news headlines, not a business textbook. Explain jargon, then use it.\n' +
@@ -382,11 +595,20 @@ export function businessGate(article = {}, opts = {}) {
   const minWords = Math.max(300, Number(opts.minWords) || 1200);
   const headings = headingsOf(body);
   const nums = [...new Set(numbersIn(full))].filter((n) => n.length >= 2 || n.includes('.'));
+  const kind = businessKind(article.title || '', {});
+  const kindEvidence = {
+    plan: /\b(cost|rent|deposit|equipment|interior|licen[cs]e|working capital|fixed cost|monthly|break[- ]even|contribution|units?)\b/i,
+    founder: /\b((?:19|20)\d{2}|founded|started|launched|acquired|sold|listed)\b/i,
+    market: /\b(risk|volatil|loss|long[- ]term|diversif|fee|fees|tax|return|downside|capital)\b/i,
+    model: /(?:)/
+  }[kind] || /(?:)/;
   const checks = {
     words,
     minWords,
     headings: headings.length,
     numbers: nums.length,
+    kind,
+    hasKindEvidence: kindEvidence === null ? true : kindEvidence.test(body),
     hasFramework: RE.framework.test(body),
     hasCounter: RE.counter.test(body),
     hasPlaybook: RE.playbook.test(body),
@@ -424,10 +646,20 @@ export function businessGate(article = {}, opts = {}) {
   if (!checks.hasPlain) W('plain', 'Plain-language setup nahi mila — headline-only reader ko context chahiye');
   if (!checks.hasAnalysis) W('analysis', 'Final Analysis section nahi mila');
   if (!checks.hasIndia) W('india', 'India context (₹/crore/Indian city) nahi dikha');
+  if (!checks.hasKindEvidence) {
+    const msg = kind === 'plan'
+      ? 'Startup cost / monthly fixed cost / break-even numbers nahi mile — plan article ke liye zaroori hain'
+      : kind === 'founder'
+        ? 'Dated timeline (saal, decision, outcome) nahi mila — founder story bina timeline ke adhuri hai'
+        : kind === 'market'
+          ? 'Risk / cost / downside ki baat nahi mili — market education bina risk ke khatarnak hai'
+          : 'Kind-specific evidence nahi mila';
+    W(`kind_${kind}`, msg);
+  }
   if (checks.genericHits.length) W('generic', `Generic AI phrases mile: ${checks.genericHits.join(', ')}`);
 
   let score = 100;
-  for (const code of ['short', 'sections', 'sections_few', 'numbers', 'framework', 'example', 'result', 'counter', 'playbook', 'risks', 'honesty', 'plain', 'analysis', 'india', 'generic']) {
+  for (const code of ['short', 'sections', 'sections_few', 'numbers', 'framework', 'example', 'result', 'counter', 'playbook', 'risks', 'honesty', 'plain', 'analysis', 'india', 'generic', `kind_${kind}`]) {
     if (errors.some((e) => e.code === code)) score -= 0;
     else if (warnings.some((w) => w.code === code || (code === 'short' && w.code === 'short_warn'))) score -= 7;
   }
@@ -448,6 +680,8 @@ export function businessMeta(gate) {
     words: Number(gate.words) || 0,
     headings: Number(gate.headings) || 0,
     numbers: Number(gate.numbers) || 0,
+    kind: gate.kind || null,
+    kindEvidence: !!gate.hasKindEvidence,
     framework: !!gate.hasFramework,
     example: !!gate.hasExample,
     result: !!gate.hasResult,

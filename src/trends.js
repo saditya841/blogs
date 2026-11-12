@@ -2,7 +2,7 @@
 import { looksInjected } from './verify.js';
 import { buildBrief, targetLang } from './preread.js';
 import { classify } from './playbook.js';
-import { BUSINESS_TOPIC_BANK, businessAngle, frameworkFor, hotBusinessTopics, isBusinessMode } from './business.js';
+import { BUSINESS_TOPIC_BANK, businessAngle, businessKind, frameworkFor, hotBusinessTopics, isBusinessMode } from './business.js';
 
 export { looksInjected };
 
@@ -218,7 +218,7 @@ export async function collectBusinessTopics(env, opts = {}) {
     if (added >= Math.max(0, room - 1)) break;
     await insert(b.q, {
       mode: 'business', via: 'hot', heat: 'high', why: 'high-intent evergreen search',
-      angle: b.angle, framework: b.framework
+      kind: businessKind(b.q), angle: b.angle, framework: b.framework
     });
   }
 
@@ -231,6 +231,7 @@ export async function collectBusinessTopics(env, opts = {}) {
       const q = String(n.title || '').replace(/\s+-\s+[^-]{2,40}$/, '').slice(0, 100);
       await insert(q, {
         mode: 'business', via: 'business-news', heat: 'fresh',
+        kind: businessKind(q),
         trendNews: [{ title: n.title, snippet: n.snippet, url: n.url, source: n.source, date: n.date || 0 }]
       });
     }
@@ -240,7 +241,7 @@ export async function collectBusinessTopics(env, opts = {}) {
   const start = day % BUSINESS_TOPIC_BANK.length;
   for (let i = 0; i < BUSINESS_TOPIC_BANK.length && added < room; i++) {
     const b = BUSINESS_TOPIC_BANK[(start + i) % BUSINESS_TOPIC_BANK.length];
-    await insert(b.q, { mode: 'business', via: 'bank', angle: b.angle, framework: b.framework });
+    await insert(b.q, { mode: 'business', via: 'bank', kind: businessKind(b.q), angle: b.angle, framework: b.framework });
   }
 
   return { added, room, errs };
@@ -307,7 +308,13 @@ export async function researchTopic(env, topic) {
     sources: brief.sources,
     brief,
     dropped: brief.dropped,
-    ...(businessMode ? { mode: 'business', angle: businessAngle(topic.query, old), framework: frameworkFor(topic.query, old) } : {}),
+    ...(businessMode ? {
+      mode: 'business',
+      kind: businessKind(topic.query, old),
+      angle: businessAngle(topic.query, old),
+      framework: frameworkFor(topic.query, old),
+      trust: brief.trust || null
+    } : {}),
     researched_at: now(),
     attempts: (old.attempts || 0) + 1,
     errors: errs,

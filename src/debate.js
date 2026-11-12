@@ -92,12 +92,12 @@ export function judgeMessages(env, o = {}) {
     .join('\n\n');
   const system =
     'You are the strict judge of a multi-AI editorial discussion for a news website. ' +
-    'You do not create new facts. You only compare what the three analysts wrote against the SOURCES. ' +
+    'You do not create new facts. You only compare what the analysts wrote against the SOURCES. ' +
     'Never write quotes or put words in a real person\'s mouth. Reject any claim that the sources do not support. ' +
     'A claim that only one source makes must still be listed, but it will be treated as single-source by code.';
   const user =
     `Topic: ${topic}\n\n${briefBlock(o.brief)}SOURCES:\n${sourceBlock(o.sources, { max: 5, chars: 1500 })}\n\n` +
-    `THREE AI ANALYSTS WROTE THIS:\n${rounds}\n\n` +
+    `THE AI ANALYSTS WROTE THIS:\n${rounds}\n\n` +
     'Task — cross-examine and build the FINAL CLAIM LIST:\n' +
     '- Compare the three analysts. Keep a claim only if at least one of them gave real evidence for it.\n' +
     '- For each kept claim, write exactly one line:\n' +
@@ -169,7 +169,8 @@ export async function runDebate(env, opts = {}) {
   const minAgree = Math.max(1, Number((env && env.MIN_AGREE_SOURCES) ?? 2));
   const rounds = Math.max(0, Math.min(2, Number((env && env.DEBATE_ROUNDS) ?? 1)));
   const deadline = Number((env && env.DEBATE_TIMEOUT_MS) || 45000);
-  const maxRoles = Math.max(2, Math.min(3, Number((env && env.DEBATE_ROLES) || 3)));
+  const requestedRoles = Array.isArray(opts.roles) && opts.roles.length ? opts.roles : DEBATE_ROLES;
+  const maxRoles = Math.max(2, Math.min(4, Number((env && env.DEBATE_ROLES) || requestedRoles.length)));
   const errors = [];
 
   if (!sources.length) {
@@ -177,7 +178,7 @@ export async function runDebate(env, opts = {}) {
   }
 
   try {
-    const roles = (Array.isArray(opts.roles) && opts.roles.length ? opts.roles : DEBATE_ROLES).slice(0, maxRoles);
+    const roles = requestedRoles.slice(0, maxRoles);
     const providers = debateProviders(env);
 
     const roleRuns = roles.map((role, i) => {
