@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseTrends, parseNewsRss, JUNK, looksInjected, fetchTrends } from '../../src/trends.js';
+import { parseTrends, parseNewsRss, JUNK, looksInjected, fetchTrends, collectBusinessTopics } from '../../src/trends.js';
 
 describe('parseTrends — Google Trends RSS', () => {
   const xml = `<rss><channel>
@@ -157,6 +157,40 @@ describe('fetchTrends — one click must never wait for a dead provider', () => 
       () => withFetch([['', fail(503)]], () => fetchTrends('IN')),
       /Topic source nahi mila/,
     );
+  });
+});
+
+describe('collectBusinessTopics — limits that actually mean something', () => {
+  const fakeEnv = ({ have = 0, ready = 0, ...env } = {}) => {
+    const sqls = [];
+    const DB = {
+      prepare(sql) {
+        sqls.push(sql);
+        const stmt = { bind: () => stmt, first: async () => ({ c: /status='ready'/.test(sql) ? ready : have }) };
+        return stmt;
+      },
+    };
+    return { env: { DB, BUSINESS_TOPIC_LIMIT: '3', ...env }, sqls };
+  };
+
+  test('a full ready buffer stops collection instead of piling up topics', async () => {
+    const { env, sqls } = fakeEnv({ have: 8, ready: 12, TOPIC_READY_MAX: '12' });
+    const r = await collectBusinessTopics(env);
+    assert.equal(r.added, 0);
+    assert.equal(r.room, 0);
+    assert.equal(r.note, 'ready buffer full');
+    assert.equal(r.ready, 12);
+    assert.ok(sqls.every((s) => !/^\s*INSERT/i.test(s)), 'no insert when the buffer is full');
+  });
+
+  test('the daily quota does not count thin topics (that was the false "limit poori")', async () => {
+    const { env, sqls } = fakeEnv({ have: 10, ready: 2 });
+    const r = await collectBusinessTopics(env);
+    assert.equal(r.room, 0);
+    assert.equal(r.note, 'daily limit reached');
+    const quota = sqls.find((s) => /created_at>/.test(s));
+    assert.ok(quota, 'quota query runs');
+    assert.ok(!/thin/.test(quota), `thin topics must not eat the quota: ${quota}`);
   });
 });
 

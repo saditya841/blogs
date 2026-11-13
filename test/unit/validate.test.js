@@ -103,6 +103,15 @@ describe('validatePost — fact-check records', () => {
     assert.ok(codes(r.errors).includes('unsupported'));
   });
 
+  test('an unverified record still allows a human approval, but never auto-publish', () => {
+    const manual = validatePost(good(), { nowSec: NOW, check: check({ verified: false }) });
+    assert.equal(manual.ok, true);
+    assert.ok(codes(manual.warnings).includes('not_verified'));
+    const strict = validatePost(good(), { nowSec: NOW, strict: true, check: check({ verified: false }) });
+    assert.equal(strict.ok, false);
+    assert.ok(codes(strict.errors).includes('not_verified'));
+  });
+
   test('an old source blocks publish (stale news)', () => {
     const r = validatePost(good(), { nowSec: NOW, check: check({ newest_source: NOW - 10 * 86400 }) });
     assert.equal(r.ok, false);
