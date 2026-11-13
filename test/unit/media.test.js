@@ -2,10 +2,11 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   MIN_PHOTO_WORDS, photoRelevant, findPhoto,
-  genericQuery, stockQuery, findPexels,
+  genericQuery, stockQuery, topicAmbiguous, findPexels,
   thumbPrompt, makeHook, aiThumbnail,
   findVideo, addMedia, brandedImage,
 } from '../../src/media.js';
+import { ImageGenerator } from '../../src/image-generator.js';
 
 describe('brandedImage — guaranteed image without any API key', () => {
   test('stores an SVG in D1 and returns a public https URL', async () => {
@@ -58,9 +59,63 @@ describe('stockQuery / genericQuery — Pexels needs English and a clear topic',
     assert.equal(stockQuery('India vs Australia cricket', 'Sports'), 'India Australia cricket');
   });
 
+  test('ambiguous topics are marked so callers try an AI illustration first', () => {
+    assert.equal(topicAmbiguous('DAC', 'India'), true);
+    assert.equal(topicAmbiguous('क्रिकेट मैच', 'Sports'), true);
+    assert.equal(topicAmbiguous('', 'Business'), true);
+    assert.equal(topicAmbiguous('Free Fire', 'Entertainment'), false);
+    assert.equal(topicAmbiguous('India vs Australia cricket', 'Sports'), false);
+  });
+
+  test('filler words such as "explained" are not sent to a photo library', () => {
+    assert.equal(stockQuery('Demat account explained', 'Business'), 'Demat account');
+    assert.equal(topicAmbiguous('IPO subscription process', 'Business'), false);
+    assert.equal(topicAmbiguous('IPO guide for beginners', 'Business'), true);
+  });
+
   test('unknown categories fall back to a neutral news image', () => {
     assert.equal(genericQuery('Nope'), 'news studio background');
     assert.equal(genericQuery(), 'news studio background');
+  });
+});
+
+describe('ImageGenerator — AI first for short/ambiguous topics', () => {
+  const fakeDB = { prepare: () => ({ run: async () => ({}), bind: () => ({ run: async () => ({}) }) }) };
+
+  test('an ambiguous title uses the AI illustration before any stock search', async () => {
+    const real = globalThis.fetch;
+    let fetches = 0, aiCalls = 0;
+    globalThis.fetch = async () => { fetches++; throw new Error('stock should not be called first'); };
+    try {
+      const env = {
+        SITE_URL: 'https://virall.in', PEXELS_API_KEY: 'k', DB: fakeDB,
+        AI: { run: async () => { aiCalls++; return { image: 'AAAA' }; } },
+      };
+      const r = await new ImageGenerator(env).generateFeaturedImage('DAC', 'India');
+      assert.equal(r.success, true);
+      assert.equal(r.provider, 'workers-ai');
+      assert.equal(aiCalls, 1);
+      assert.equal(fetches, 0);
+    } finally { globalThis.fetch = real; }
+  });
+
+  test('a clear topic still gets a relevant stock photo first', async () => {
+    const real = globalThis.fetch;
+    let aiCalls = 0;
+    globalThis.fetch = async () => ({ ok: true, json: async () => ({ photos: [
+      { alt: 'India Australia cricket stadium at night', src: { large: 'https://x/cricket.jpg' }, photographer: 'A' },
+    ] }) });
+    try {
+      const env = {
+        SITE_URL: 'https://virall.in', PEXELS_API_KEY: 'k', DB: fakeDB,
+        AI: { run: async () => { aiCalls++; return { image: 'AAAA' }; } },
+      };
+      const r = await new ImageGenerator(env).generateFeaturedImage('India vs Australia cricket final', 'Sports');
+      assert.equal(r.success, true);
+      assert.equal(r.provider, 'pexels');
+      assert.equal(r.featuredImage, 'https://x/cricket.jpg');
+      assert.equal(aiCalls, 0);
+    } finally { globalThis.fetch = real; }
   });
 });
 
@@ -74,6 +129,29 @@ describe('network helpers stop early without keys', () => {
   test('findPexels is a no-op when PEXELS_API_KEY is missing', async () => {
     assert.equal(await findPexels({}, 'india city', 'India'), null);
     assert.equal(await findPexels(null, 'india city', 'India'), null);
+  });
+
+  test('a generic stock photo must still match a keyword in its alt text', async () => {
+    const real = globalThis.fetch;
+    try {
+      globalThis.fetch = async () => ({ ok: true, json: async () => ({ photos: [
+        { alt: 'a random office desk', src: { large: 'https://x/a.jpg' }, photographer: 'A' },
+      ] }) });
+      assert.equal(await findPexels({ PEXELS_API_KEY: 'k' }, 'DAC', 'India'), null);
+    } finally { globalThis.fetch = real; }
+  });
+
+  test('a topic photo needs most of the query words, and people are skipped', async () => {
+    const real = globalThis.fetch;
+    try {
+      globalThis.fetch = async () => ({ ok: true, json: async () => ({ photos: [
+        { alt: 'India cricket player in the stadium', src: { large: 'https://x/people.jpg' }, photographer: 'A' },
+        { alt: 'India cricket stadium at night', src: { large: 'https://x/good.jpg' }, photographer: 'B' },
+      ] }) });
+      const r = await findPexels({ PEXELS_API_KEY: 'k' }, 'India vs Australia cricket', 'Sports');
+      assert.equal(r.url, 'https://x/good.jpg');
+      assert.match(r.credit, /Pexels/);
+    } finally { globalThis.fetch = real; }
   });
 
   test('findVideo explains that the YouTube key is missing', async () => {

@@ -324,7 +324,7 @@ describe('businessGate — code decides if it is a real business article', () =>
   });
 
   test('a plan article without cost or break-even evidence gets a kind warning', () => {
-    const body = goodBusiness().body.replace(/rent/g, 'bijli').replace(/cost/gi, 'kharch');
+    const body = goodBusiness().body.replace(/rent/g, 'bijli').replace(/cost/gi, 'kharch').replace(/unit/gi, 'hisab').replace(/contribution/gi, 'hissa');
     const g = businessGate(goodBusiness({ title: 'Coffee shop startup cost India break-even', body }), { minWords: 900 });
     assert.equal(g.kind, 'plan');
     assert.equal(g.hasKindEvidence, false);

@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import worker, { adsPub } from '../../src/index.js';
+import worker, { adsPub, validEmail, numText } from '../../src/index.js';
 
 // The fetch handler is only called for routes that do not touch D1.
 const call = (path, env = {}) => worker.fetch(new Request('https://virall.in' + path), { SITE_URL: 'https://virall.in', SITE_NAME: 'Virall', ...env });
@@ -43,7 +43,38 @@ describe('public text routes — no database needed', () => {
     const txt = await (await call('/robots.txt')).text();
     assert.match(txt, /Disallow: \/admin/);
     assert.match(txt, /Disallow: \/search/);
+    assert.match(txt, /Disallow: \/subscribe/);
     assert.match(txt, /Sitemap: https:\/\/virall\.in\/sitemap\.xml/);
+  });
+
+  test('the subscribe page has a simple email form', async () => {
+    const html = await (await call('/subscribe')).text();
+    assert.match(html, /action="\/subscribe"/);
+    assert.match(html, /type="email"/);
+    assert.match(html, /name="website"/); // honeypot
+    assert.match(html, /noindex,nofollow/);
+  });
+
+  test('a successful subscription is confirmed without echoing an address', async () => {
+    const html = await (await call('/subscribe?ok=1')).text();
+    assert.match(html, /Subscribed/);
+    assert.ok(!html.includes('reader@example.org'));
+  });
+
+  test('validEmail accepts normal addresses and rejects broken input', () => {
+    assert.equal(validEmail('reader@example.com'), true);
+    assert.equal(validEmail('  Reader@Example.CO.in '), true);
+    assert.equal(validEmail('no-at-sign'), false);
+    assert.equal(validEmail('a@b'), false);
+    assert.equal(validEmail('a b@c.com'), false);
+    assert.equal(validEmail(''), false);
+  });
+
+  test('numText never prints undefined in the admin UI', () => {
+    assert.equal(numText(1200), 1200);
+    assert.equal(numText('1200'), 1200);
+    assert.equal(numText(undefined), 0);
+    assert.equal(numText(null), 0);
   });
 
   test('IndexNow key file is served when the key is configured', async () => {

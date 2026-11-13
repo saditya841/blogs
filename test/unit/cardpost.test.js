@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseCardOutput, guardCard, renderCardPage, renderCardsList } from '../../src/cardpost.js';
+import { parseCardOutput, guardCard, renderCardPage, renderCardsList, cardIndexable } from '../../src/cardpost.js';
 
 describe('parseCardOutput', () => {
   test('reads the hook and bullet points, and strips markdown', () => {
@@ -111,9 +111,30 @@ describe('renderCardPage — safe HTML', () => {
     assert.ok(html.includes('फोटो: Someone / CC BY'));
   });
 
-  test('cards are noindex by default and indexable only when CARD_INDEX=1', () => {
+  test('thin cards stay noindex; CARD_INDEX=1 can force indexing', () => {
     assert.ok(renderCardPage(env, topic, post).includes('content="noindex,follow"'));
     assert.ok(renderCardPage({ ...env, CARD_INDEX: '1' }, topic, post).includes('content="index,follow"'));
+  });
+
+  test('a card with 3+ points, an https image and a source is indexed automatically', () => {
+    const rich = { ...post, points: ['One solid point.', 'Two solid points.', 'Three solid points.'] };
+    assert.equal(cardIndexable(env, rich), true);
+    assert.ok(renderCardPage(env, topic, rich).includes('content="index,follow"'));
+  });
+
+  test('auto-index needs all three: points, https image and a named source', () => {
+    assert.equal(cardIndexable(env, { ...post, points: ['a', 'b', 'c'], image_url: 'http://x/a.jpg' }), false);
+    assert.equal(cardIndexable(env, { ...post, points: ['a', 'b', 'c'], outlets: [] }), false);
+    assert.equal(cardIndexable(env, { ...post, points: ['a', 'b'] }), false);
+    assert.equal(cardIndexable({ ...env, CARD_INDEX: '0' }, { ...post, points: ['a', 'b', 'c'] }), false);
+  });
+
+  test('JSON-LD describes the card as a NewsArticle and cannot break out of the script tag', () => {
+    const html = renderCardPage(env, topic, post);
+    assert.ok(html.includes('"@type":"NewsArticle"'));
+    assert.ok(html.includes('"headline":'));
+    assert.ok(html.includes('mainEntityOfPage'));
+    assert.ok(!html.includes('</script>alert(1)'));
   });
 
   test('a non-https image is never put into a background style', () => {

@@ -1,6 +1,6 @@
 import { test, describe, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { MultiAPIManager, API_CONFIGS, configFor } from '../../src/multi-api-manager.js';
+import { MultiAPIManager, API_CONFIGS, configFor, normalizeMessages, geminiContents, cohereMessages } from '../../src/multi-api-manager.js';
 
 const MIN = 60 * 1000;
 
@@ -22,6 +22,60 @@ const failure = (status, text = 'error') => ({
   status,
   statusText: 'Error',
   text: async () => text,
+});
+
+describe('message normalization — blank/duplicate turns no longer break Gemini or Cohere', () => {
+  test('empty content is dropped and consecutive same-role turns are merged', () => {
+    const out = normalizeMessages([
+      { role: 'system', content: 'SYS' },
+      { role: 'user', content: '  ' },
+      { role: 'user', content: 'First' },
+      { role: 'user', content: 'Second' },
+      { role: 'assistant', content: 'Earlier' },
+      { role: 'bogus', content: null },
+    ]);
+    assert.deepEqual(out, [
+      { role: 'system', content: 'SYS' },
+      { role: 'user', content: 'First\n\nSecond' },
+      { role: 'assistant', content: 'Earlier' },
+    ]);
+  });
+
+  test('Gemini contents start with a user turn and use model for assistant', () => {
+    const { system, contents } = geminiContents([
+      { role: 'system', content: 'SYS' },
+      { role: 'assistant', content: 'Earlier' },
+      { role: 'user', content: 'Hi' },
+    ]);
+    assert.equal(system, 'SYS');
+    assert.equal(contents[0].role, 'user');
+    assert.equal(contents[1].role, 'model');
+    assert.equal(contents[1].parts[0].text, 'Earlier');
+  });
+
+  test('Cohere keeps one system message first and starts/ends with user', () => {
+    const out = cohereMessages([
+      { role: 'assistant', content: 'Earlier' },
+      { role: 'system', content: 'SYS' },
+      { role: 'user', content: 'Hi' },
+    ]);
+    assert.equal(out[0].role, 'system');
+    assert.equal(out[1].role, 'user');
+    assert.equal(out[out.length - 1].role, 'user');
+    assert.equal(out[0].content, 'SYS');
+  });
+
+  test('an all-blank conversation returns a clear error without calling any provider', async () => {
+    const real = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = async () => { calls++; throw new Error('should not fetch'); };
+    try {
+      const r = await new MultiAPIManager({ GROQ_API_KEY: 'k' }).generate([{ role: 'user', content: '   ' }]);
+      assert.equal(r.text, '');
+      assert.equal(calls, 0);
+      assert.match(r.errors[0], /empty/i);
+    } finally { globalThis.fetch = real; }
+  });
 });
 
 describe('configFor — settings from wrangler vars', () => {

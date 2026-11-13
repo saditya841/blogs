@@ -1,7 +1,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  copyCheck, parseDraft, scoreDraft, ungroundedNumbers, slugify, dayStartIST, langOf, CATS,
+  copyCheck, parseDraft, scoreDraft, ungroundedNumbers, slugify, dayStartIST, langOf, CATS, rankDraftAttempt,
 } from '../../src/writer.js';
 
 describe('copyCheck — copied text detection', () => {
@@ -116,6 +116,34 @@ describe('slugify — readable Hindi URLs', () => {
 
   test('empty title still gives a usable slug', () => {
     assert.match(slugify(''), /^post-[a-z0-9]{5}$/);
+  });
+});
+
+describe('rankDraftAttempt — the best of several tries wins', () => {
+  const draft = { title: 'A real title', body: 'body' };
+
+  test('a missing or untitled draft can never win', () => {
+    assert.ok(rankDraftAttempt({ draft: null }) < -1e8);
+    assert.ok(rankDraftAttempt({ draft: { title: '', body: 'x' } }) < -1e8);
+  });
+
+  test('a complete, original draft beats a copied one with the same length', () => {
+    const clean = rankDraftAttempt({ draft, metrics: { words: 1300, overlap: 0, longest: 5, ungrounded: [] }, business: true });
+    const copied = rankDraftAttempt({ draft, metrics: { words: 1300, overlap: 0.4, longest: 14, ungrounded: [] }, business: true });
+    assert.ok(clean > copied);
+  });
+
+  test('business gate score and word count matter, but rank drops for invented numbers', () => {
+    const good = rankDraftAttempt({ draft, metrics: { words: 1300, overlap: 0, ungrounded: [] }, gate: { score: 90 }, business: true });
+    const weak = rankDraftAttempt({ draft, metrics: { words: 700, overlap: 0, ungrounded: ['9999', '1234'] }, gate: { score: 55 }, business: true });
+    assert.ok(good > weak);
+  });
+
+  test('a news draft needs at least 150 words to be usable', () => {
+    const short = rankDraftAttempt({ draft, metrics: { words: 100 } });
+    const ok = rankDraftAttempt({ draft, metrics: { words: 500 } });
+    assert.ok(ok > short);
+    assert.ok(ok >= 1000);
   });
 });
 
