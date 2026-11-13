@@ -122,3 +122,13 @@ CREATE TABLE IF NOT EXISTS corrections (
   created_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_corrections_post ON corrections(post_id, created_at);
+
+-- Newsletter (single opt-in). No accounts/passwords: one email = one row.
+-- subscribers bhi lazily banti hai (ensureSubscribers in index.js).
+CREATE TABLE IF NOT EXISTS subscribers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  source TEXT,
+  created_at INTEGER NOT NULL,
+  unsubscribed INTEGER NOT NULL DEFAULT 0
+);

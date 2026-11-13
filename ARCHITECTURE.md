@@ -48,7 +48,7 @@ Aakhri update: 11 Nov 2026 | Code: `src/*.js` | DB: D1 `virall-db` | Deploy: Clo
                                 ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
 │ 4. MULTI-AI DEBATE + CROSS-CHECK (token)            debate.js + claims.js│
-│    Reporter / Analyst / Skeptic (3 alag provider par parallel)           │
+│    Reporter / Analyst / Skeptic (+ optional Source Verifier)             │
 │    → Judge AI cross-examine karta hai (kaun kis claim se agree)          │
 │    → code: evidence 3-word match + numbers + outlet count                │
 │    → ledger: verified (2+ outlets) | single-source | unsupported         │
@@ -114,14 +114,15 @@ Aakhri update: 11 Nov 2026 | Code: `src/*.js` | DB: D1 `virall-db` | Deploy: Clo
 |---|---|---|
 | `src/index.js` | Public site, SEO pages, sitemap/RSS, admin UI + routes | D1 |
 | `src/trends.js` | Trends ×2 + News parallel, junk filter, business topic collection, research one topic | Yes (free, no AI) |
-| `src/business.js` | Business topic bank, hot-traffic query list, 13 frameworks, operator prompt, depth gate, derived arithmetic | No |
+| `src/business.js` | ~106 topic queries, 52 hot queries, 4 article kinds, 13 frameworks, operator prompt, depth gate, derived arithmetic | No |
+| `src/sourcetrust.js` | Domain trust ranking (official → financial press → general → reference → blog), strong/ok/weak summary, stable sorting | No |
 | `src/deepen.js` | Existing Business draft ka 0-token gap report + fresh-source deepening (write → re-fact-check → gate) | AI (manual) |
 | `src/autoheal.js` | Topic cleanup planner, duplicate pruning, metadata repair, opt-in draft healing, agent run log | DB + AI (manual) |
 | `src/autodraft.js` | Hourly auto-draft safety rails: approval-queue cap, auto-reject low-quality business drafts | No |
 | `src/preread.js` | 0-token reading brief: language, relevance, facts, allowed numbers, gaps | No |
 | `src/facts.js` | 2+ outlet agreed facts, date/number keys | No |
 | `src/verify.js` | injection check, shingles, grounded claims, numbers/names not in sources | No |
-| `src/debate.js` | 3 neutral AI roles + judge, provider rotation, timeouts | AI |
+| `src/debate.js` | 3 neutral AI roles + optional Source Verifier + judge, provider rotation, timeouts | AI |
 | `src/claims.js` | Claim ledger: parse, evidence match, outlet count, verified/single-source/unsupported/conflict | No |
 | `src/conflicts.js` | Same fact ke do alag numbers (outlet vs outlet) pakadta hai | No |
 | `src/originality.js` | 6-word runs se originality score (sources se kitna alag likha) | No |
@@ -150,6 +151,7 @@ Aakhri update: 11 Nov 2026 | Code: `src/*.js` | DB: D1 `virall-db` | Deploy: Clo
 | **Reporter** | Sirf confirmed facts: kya, kab, kahan, kaun |
 | **Analyst** | Is khabar ka matlab, context, kis par asar |
 | **Skeptic** | Kya missing hai, kaun si baat sirf 1 source me hai, contradictions |
+| **Source Verifier** (optional, `DEBATE_ROLES=4`) | Claim kis type ki source par hai: official filing, financial press, company claim ya blog; dates aur conflicts |
 
 ### Hard safety rules (prompt + code)
 
@@ -166,6 +168,7 @@ Aakhri update: 11 Nov 2026 | Code: `src/*.js` | DB: D1 `virall-db` | Deploy: Clo
 role 0 → GROQ → GEMINI → HF → COHERE
 role 1 → GEMINI → HF → COHERE → GROQ
 role 2 → HF → COHERE → GROQ → GEMINI
+role 3 → COHERE → GROQ → GEMINI → HF   (Source Verifier, DEBATE_ROLES=4)
 judge  → COHERE → GROQ → GEMINI → HF
 ```
 
@@ -281,10 +284,31 @@ tab chalti hai jab env switch ON ho ya topic ke `research.mode === "business"` h
 
 ### Topics (0 token)
 
-`business.js` me ~48 evergreen, India-first queries ka `BUSINESS_TOPIC_BANK` hai (DMart, Zerodha, Amul,
-quick commerce, kirana economics, MSME cash flow, SaaS pricing, etc.). Har entry me `angle` + `framework`.
-Inme se 20 sabse zyada search-hone wale sawaal `BUSINESS_HOT_QUERIES` me alag list hain (DMart low-margin
-model, Zerodha revenue, dark-store economics, restaurant failure reasons, D2C CAC/LTV, UPI economics...).
+`business.js` me ~106 evergreen, India-first queries ka `BUSINESS_TOPIC_BANK` hai (DMart, Zerodha, Amul,
+quick commerce, kirana economics, MSME cash flow, SaaS pricing, share-market education, startup-cost plans,
+founder case studies, etc.). Har entry me `angle` + `framework`.
+Inme se 52 sabse zyada search-hone wale sawaal `BUSINESS_HOT_QUERIES` me alag list hain (DMart low-margin
+model, Zerodha revenue, dark-store economics, restaurant failure reasons, D2C CAC/LTV, UPI economics, PE ratio,
+coffee-shop break-even, Dhirubhai Ambani lessons...).
+
+### Article kinds + source trust
+
+`businessKind()` har topic ko 4 editorial categories me baantta hai; `kindRules()` prompt me category-specific
+evidence rules daalta hai:
+
+| Kind | Kya chahiye | Hard rule |
+|---|---|---|
+| `market` | concept, cost, 2+ risks, worked example | no buy/sell/target price/multibagger; "education, not investment advice" |
+| `plan` | startup cost, monthly fixed cost, contribution, break-even, downside case | assumptions ko estimate label; profit promise nahi |
+| `founder` | dated timeline (saal → decision → outcome) | no invented quote; survivorship bias counterpoint |
+| `model` | who pays whom, unit economics, moat, break point | sourced numbers, operator view |
+
+`sourcetrust.js` har source ko domain ke hisaab se rank karta hai (official/regulator/exchange 100,
+financial press 85, general press 70, company/IR 72, startup press 62, reference 55, aggregator 35,
+blog/social 20, unknown 40). Pre-read sources ko trust order me sort karta hai aur brief me
+`SOURCE TRUST` line jodta hai; writer/editor prompt me har source `[trust: …]` label ke saath jaata hai.
+Summary `check_json.sourceTrust` me save hoti hai. Weak trust = warning; `strict` auto-publish me error.
+Ye truth verdict nahi hai — evidence ka weight hai.
 
 `trends.js::collectBusinessTopics` teen jagah se topics laata hai, isi order me:
 
@@ -328,7 +352,8 @@ Rules prompt me + code me:
 
 0-token check: words (default 1200, 80% hard floor), 8–10 headings, 3+ numbers, named framework,
 worked example, result/outcome, counterpoint, playbook, risks, honesty section, plain-language setup,
-India context, generic-AI phrases. Score 100 se shuru, har missing layer par -7; `guarantee` -30,
+India context, generic-AI phrases, aur kind-specific evidence (plan = cost/break-even, founder = dated
+timeline, market = risk/cost/downside). Score 100 se shuru, har missing layer par -7; `guarantee` -30,
 `stock_tip` -25. `ok` ke liye score 70+, hard-fail nahi, words floor, 7+ headings, aur **example +
 result dono** zaroori — sirf headings ka hona kaafi nahi.
 
@@ -340,6 +365,7 @@ result allow hota hai jab inputs sources me hon aur arithmetic 2% tolerance ke a
 ```json
 {
   "ok": true, "score": 86, "words": 1342, "headings": 10, "numbers": 9,
+  "kind": "plan", "kindEvidence": true,
   "framework": true, "example": true, "result": true, "plain": true,
   "counterpoint": true, "playbook": true, "risks": true,
   "honesty": true, "india": true,
@@ -407,6 +433,43 @@ lekin `autodraft.js` do hard rails lagata hai:
 
 Isliye "har ghante" ka matlab 24 posts/day nahi — max `BUSINESS_DAILY_LIMIT` (3) quality drafts/day, aur
 review queue kabhi 6 se zyada nahi hoti. Auto-publish ON karne ki zaroorat nahi; human gate chalu rehta hai.
+
+### Card pages (SEO-safe short content)
+
+`cardpost.js::cardIndexable(env, post)` ek pure rule hai:
+
+- 3+ non-empty points **aur** https image **aur** 1+ named outlet = `index,follow`
+- `CARD_INDEX=1` sab force index; `CARD_INDEX=0` sab noindex
+- `renderCardPage` indexable cards par `NewsArticle` JSON-LD deta hai (`</script>` escape ke saath)
+- `/sitemap.xml` sirf wahi cards list karta hai jo rule pass karte hain; patle cards sitemap me nahi
+
+### Newsletter (`subscribers`)
+
+Footer form → `POST /subscribe` → honeypot + `validEmail()` → D1 `subscribers` (single opt-in,
+`UNIQUE COLLATE NOCASE`) → `/subscribe?ok=1`. `/admin/subscribers` list + `/admin/subscribers.csv`
+(BOM + quoted CSV). Koi account/password/comment nahi — moderation aur AdSense thin-content risk se bachne
+ke liye. Privacy page me email collection ka disclosure hai.
+
+### AdSense readiness (`/admin/adsense`)
+
+Page code-side checks chalata hai: `ADSENSE_PUB` format, `ADSENSE_SLOT`, approved/long/business/sourced/image
+counts, policy pages, https `SITE_URL`, `CONTACT_EMAIL`, auto-publish OFF. Missing items ke saath exact
+secret/action dikhta hai. Ye **readiness** hai, approval ki guarantee nahi.
+
+### Free-tier fallback + cache
+
+- AI: Groq → Gemini → HF → Cohere (model-level failover, 401/402/403/429 cooldown) → Workers AI backup.
+- Gemini/Cohere messages `normalizeMessages()` se guzarte hain (blank drop, same-role merge, user-first);
+  isse system prompt preserve rehta hai aur empty/odd conversations provider error nahi dete.
+- Public HTML: `s-maxage=600, stale-while-revalidate=86400` — cache turant serve hota hai, refresh background me.
+- IndexNow hourly `scheduled()` me chalta hai (`pinged=0` posts), approval ke baad koi manual step nahi.
+
+### Media on short/ambiguous topics
+
+`stockQuery()` filler words hatata hai. `topicAmbiguous()` true ho (no 2+ usable English words) to
+`addMedia()` **aur** `ImageGenerator.generateFeaturedImage()` AI illustration pehle try karte hain, random
+category stock photo nahi. Pexels me generic query bhi alt-text keyword ke bina reject hoti hai. Fallback
+chain: Pexels → Wikimedia → AI → branded SVG. Unsplash dependency nahi hai.
 
 ---
 
@@ -550,6 +613,7 @@ corrections(id, post_id, old_text, new_text, reason, created_at)
 | `BUSINESS_MIN_WORDS` | `1200` | Business article depth floor (80% hard fail) |
 | `BUSINESS_SOURCE_FRESH_DAYS` | `365` | Business analysis source window (news 3 days; 90+ days warning) |
 | `BUSINESS_TOPIC_LIMIT` | `3` | Ek run me naye business topics |
+| `DRAFT_MAX_ATTEMPTS` | `3` | Ek draft click par 2–4 AI attempts; best attempt rank hota hai |
 | `TOPIC_READY_MAX` | `12` | Auto-heal ready backlog cap |
 | `TOPIC_THIN_DAYS` | `7` | Purane thin/rejected topics delete |
 | `TOPIC_READY_DAYS` | `14` | Purane ready topics delete |
@@ -567,6 +631,7 @@ corrections(id, post_id, old_text, new_text, reason, created_at)
 | `DUPLICATE_CHECK` | `true` | Duplicate gate on/off |
 | `DUP_MAX_SIMILARITY` | `0.82` | Block threshold |
 | `STYLE_MIN_SCORE` | `60` | Report-only threshold |
+| `CARD_INDEX` | auto | Khali = substance rule se auto index; `1`/`0` force |
 | `REQUIRE_HUMAN_EDIT` | `true` | Insaan ke edit/note ke bina publish nahi |
 | `FACT_REGISTRY` | `true` | Verified facts D1 me save + stale warning |
 | `FACT_MAX_AGE_HOURS` | `24` | Fact re-check reminder window |
@@ -718,15 +783,18 @@ baaki tables `IF NOT EXISTS` hain.
 
 ## 16. Test coverage
 
-- `npm test` → **366 pass, 0 fail** (91 suites, 23 files)
-- `npm run check` → **33/33 modules load**
+- `npm test` → **418 pass, 0 fail** (100 suites, 24 files)
+- `npm run check` → **34/34 modules load**
 
 New tests: `claims`, `similarity`, `style`, `debate` (ledger, duplicate, human-style, safe roles,
 provider rotation, judge fallback, timeouts, no-source/less-roles failures), `quality-layers`
 (conflicts, originality, specificity, voice, fact registry, corrections, source liveness — in-memory
 SQLite D1 adapter se, koi network nahi), `business` (topic bank rotation, hot-topic bank sync,
-10-section prompt, depth gate, example/result requirement, guarantee/stock-tip block, derived
-arithmetic, business preflight, Business publish rules), `deepen` (0-token gap report for thin posts
+4 article kinds, kind-specific prompt/gate evidence, 10-section prompt, depth gate, example/result
+requirement, guarantee/stock-tip block, derived arithmetic, business preflight, Business publish rules),
+`sourcetrust` (domain tiers, strong/ok/weak summary, stable sorting), `deepen` (0-token gap report for thin posts
 aur complete posts), `autoheal` (topic cleanup plan, duplicate normalisation, age/mode pruning, metadata
 repair) aur `autodraft` (approval-queue cap, auto-reject on depth-gate/score fail,
-broken env values).
+broken env values). Latest additions: `writer::rankDraftAttempt` (best of 2–4 attempts), `api-manager`
+message normalization + Gemini/Cohere request shapes, `cardpost::cardIndexable` + JSON-LD + auto-index,
+`media` ambiguous-topic/Pexels relevance, aur `index` subscribe form/`validEmail`/`numText`.

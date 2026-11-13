@@ -21,6 +21,7 @@ Business mode default me ON hai (`BUSINESS_MODE=true`). News pipeline code me ma
 | Worker + saare routes | `src/index.js` |
 | Topic discovery (Google Trends / News) | `src/trends.js` |
 | Business topic bank + frameworks + depth gate | `src/business.js` |
+| Source trust ranking (official → financial press → general → reference → blog) | `src/sourcetrust.js` |
 | Auto-heal agent (topic cleanup + metadata repair + draft deepening) | `src/autoheal.js` |
 | Zero-token source pre-read / reading brief | `src/preread.js` |
 | Multi-AI debate + code-checked claim ledger | `src/debate.js`, `src/claims.js` |
@@ -51,7 +52,7 @@ risky hai — isliye manual approve default hai.
 Zaroorat: **Node.js 22+** (Node 26 par test kiye gaye). `npm install` ki zaroorat nahi — koi dependency nahi hai.
 
 ```bash
-npm test          # 347 unit tests (network nahi, DB nahi)
+npm test          # 418 unit tests (network nahi, DB nahi)
 npm run check     # har src/*.js ko import karke syntax/import error pakadta hai
 npx wrangler dev  # local Worker (pehli baar Cloudflare login maangega)
 ```
@@ -151,10 +152,11 @@ koi key nahi chahiye. Sirf `PEXELS_API_KEY` / `YOUTUBE_API_KEY` na hone se photo
 | `TRENDS_GEO` | `IN` | Google Trends region. |
 | `BUSINESS_MODE` | `true` | ON = business blog pipeline (business news + evergreen topic bank, Wikipedia background source, business depth gate). `false` = purana news pipeline. |
 | `BUSINESS_LANG` | `en` | Default business article language (`en`/`hi`). Admin se per draft EN/HI chuna ja sakta hai. |
-| `BUSINESS_DAILY_LIMIT` | `3` | Business mode ka hard daily draft cap. Isse zyada draft ek din me nahi bante. |
+| `BUSINESS_DAILY_LIMIT` | `3` | Business mode ka hard daily draft cap. Sirf `category='Business'` posts count hote hain, isliye news/manual post isse exhaust nahi karta. |
 | `BUSINESS_MIN_WORDS` | `1200` | Business article ki minimum depth (words). Gate 80% se neeche hard-fail karta hai. |
 | `BUSINESS_SOURCE_FRESH_DAYS` | `365` | Business analysis ke liye source freshness window. News 3 din hi rehta hai; 90 din se purane source par warning. |
 | `BUSINESS_TOPIC_LIMIT` | `3` | Ek run me kitne naye business topics laane hain. |
+| `DRAFT_MAX_ATTEMPTS` | `3` | Ek draft click par AI ko 2–4 koshishon tak mauka. Har koshish overlap/number/gate feedback ke saath; best attempt jeetta hai. |
 | `TOPIC_READY_MAX` | `12` | Auto-heal cleanup ready backlog ka cap (3-4 din ka writing buffer). |
 | `TOPIC_THIN_DAYS` | `7` | Itne din purane thin/rejected topics delete. |
 | `TOPIC_READY_DAYS` | `14` | Itne din purane ready topics delete (sources stale hote hain). |
@@ -169,17 +171,17 @@ koi key nahi chahiye. Sirf `PEXELS_API_KEY` / `YOUTUBE_API_KEY` na hone se photo
 | `SCORE_MAX` | `94` | Writer ka score cap. **94 < 95**, isliye default me auto-publish kabhi fire nahi hota — ye jaan-boojh kar hai. |
 | `ENABLE_AI_EDITOR` | `true` | `false` = editor + fact-check pass band (sirf debugging ke liye; posts tab verified nahi honge). |
 | `EDITOR_MAX_ROUNDS` | `2` | Fact-check fail hone par AI ko kitne extra mauke (0 = sirf ek pass). |
-| `CARD_INDEX` | khali | `1` = `/card/<id>` pages indexable (default noindex). |
+| `CARD_INDEX` | auto | Khali = 3+ points + https image + named source wale cards **auto index**. `1` = sab cards force index, `0` = sab noindex. |
 | `POLICY_UPDATED` | `2026-11-08` | Privacy page ki "Last updated" date. |
 | `AI_MODEL` | `@cf/openai/gpt-oss-20b` | Workers AI model. |
 | `USE_MULTI_API` | `true` | Pehle Groq/Gemini/HF/Cohere, phir Workers AI. |
 | `API_ORDER` | `groq,gemini,huggingface,cohere` | Provider order override. |
 | `*_MODELS`, `*_DAILY_LIMIT` | code defaults | Per-provider model list / soft limit. |
-| `THUMB_MODE` | khali | `ai` = AI thumbnail pehle, warna stock photo pehle. |
+| `THUMB_MODE` | khali | `ai` = AI thumbnail pehle. Short/ambiguous topic par default bhi AI-first hota hai (random stock photo nahi). |
 | `API_TIMEOUT_MS` | `25000` | Har provider call ka timeout. |
-| `DEBATE_ENABLED` | `true` | Multi-AI debate (Reporter/Analyst/Skeptic + judge) write se pehle. |
-| `DEBATE_ROUNDS` | `1` | `0` = sirf 3 roles, `1` = judge cross-exam bhi. |
-| `DEBATE_ROLES` | `3` | Kitne neutral roles (2–3). |
+| `DEBATE_ENABLED` | `true` | Multi-AI debate (neutral analyst roles + judge) write se pehle. |
+| `DEBATE_ROUNDS` | `1` | `0` = sirf roles, `1` = judge cross-exam bhi. |
+| `DEBATE_ROLES` | `3` | Kitne neutral roles (2–4). `4` = Source Verifier bhi chalta hai (real-vs-fake provenance check). |
 | `DEBATE_TIMEOUT_MS` | `45000` | Ek debate ka hard deadline (page hang nahi hota). |
 | `DEBATE_REUSE_SECONDS` | `7200` | Preview debate itni der write me reuse (double token no). |
 | `DEBATE_PROVIDER_ORDER` | khali | Optional: `cohere,groq,gemini` — kaun pehle. |
@@ -249,7 +251,7 @@ Pehli baar deploy ke baad:
 - **Har draft me image guarantee**: AI/stock image fail ho to branded news-card SVG (0 token, koi API key nahi) `/img/<id>.svg` par banti hai. Topic page par 0-token image preview bhi dikhta hai.
 - **Video optional hai**: site par video lagane ke liye free `YOUTUBE_API_KEY` secret chahiye. Na ho to article phir bhi image ke saath publish ho sakta hai.
 - **Card banao** (0 token) seedha us topic ka page kholta hai, jahan "Card post banao" button milta hai.
-- **Multi-AI debate chalao** (topic page) 3 neutral roles (Reporter/Analyst/Skeptic) + judge chalta hai. Har claim ke saath source line aati hai, aur code check karta hai ki evidence sach me sources me hai ya nahi. Result topic page par verified / single-source / unsupported claims ke roop me dikhta hai.
+- **Multi-AI debate chalao** (topic page) neutral roles (Reporter/Analyst/Skeptic, `DEBATE_ROLES=4` par Source Verifier bhi) + judge chalta hai. Har claim ke saath source line aati hai, aur code check karta hai ki evidence sach me sources me hai ya nahi. Result topic page par verified / single-source / unsupported claims ke roop me dikhta hai.
 - **Approve: iska article likho** dabane par wahi debate (agar 2 ghante ke andar chala hai) reuse hota hai, isliye token dobara kharch nahi hote. Debate na chala ho to write click khud chala leta hai — single click me result.
 - **Duplicate gate (0 token):** agar same story pehle se site par hai (SimHash + MinHash + title hash), topic `duplicate` ho jata hai, AI token kharch nahi hota, aur admin ko purana post dikh jata hai.
 - **Style guard (0 token):** draft me `furthermore`/`in conclusion` jaise AI phrases, flat sentence rhythm ya repeated phrases hon to score me penalty lagti hai; post review page par style score + notes dikhte hain.
@@ -261,6 +263,19 @@ Pehli baar deploy ke baad:
 - **Auto-heal agent (`/admin/autoheal`):** purane thin/rejected/duplicate topics aur ready backlog (top 12 ke baad) ka preview dikhata hai, phir confirm par delete karta hai (0 token). Thin Business draft ek click me deepen hota hai (token), missing summary/tags/meta body se bhar jate hain (0 token), aur har run ka before/after log rehta hai. Cron roz 03:30 IST par sirf 0-token cleanup chalata hai.
 - **Corrections:** admin review page se correction darj karo - article ke neeche dated `Update (YYYY-MM-DD)` line judti hai aur `/corrections` par sab public dikhta hai.
 
+### Latest reliability fixes (10 kamiyan)
+
+1. **Draft reliability:** ek click par ab 2–4 AI attempts (`DRAFT_MAX_ATTEMPTS`, default 3). Har retry ko overlap/number/gate ka targeted feedback milta hai aur `rankDraftAttempt` best attempt chunta hai — last answer nahi.
+2. **Word count:** admin ke saare messages `numText()` se guzarte hain, isliye `undefined shabd` nahi dikhta.
+3. **Daily limits:** Business draft cap sirf `category='Business'` posts ginta hai; news/manual post usse exhaust nahi karta. News cap bhi sirf non-Business posts ginta hai.
+4. **Image quality:** short/ambiguous topic (jaise `DAC`, Hindi-only query) par AI illustration pehle try hoti hai. Pexels search se filler words (`explained`, `guide`, `analysis`) hataate hain aur generic photo bhi alt-text keyword match ke bina accept nahi hoti.
+5. **Card indexing:** 3+ points + https image + named source = `index,follow` + NewsArticle JSON-LD + sitemap entry. `CARD_INDEX=1/0` se force override.
+6. **Newsletter:** footer single opt-in form, `/subscribe`, D1 `subscribers`, `/admin/subscribers` + CSV. Accounts/comments jaan-boojh kar nahi (spam/moderation/AdSense risk); newsletter safe substitute hai.
+7. **Free-tier fallback:** Groq → Gemini → HF → Cohere → Workers AI, model-level failover + cooldown; public HTML par `stale-while-revalidate`. IndexNow hourly cron me pehle se chalta hai.
+8. **Traffic automation:** sitemap/news-sitemap/RSS/IndexNow/cards/newsletter sab automatic. **Content review human hi rahega** — ye AdSense safety ke liye design hai, kami nahi.
+9. **Gemini/Cohere:** blank/duplicate/out-of-order messages normalize hote hain (system prompt preserve, user turn se start/end). Unsplash dependency hai hi nahi — fallback Pexels → Wikimedia → AI → branded SVG hai.
+10. **AdSense:** `/admin/adsense` exact missing secrets + content checks + manual steps dikhata hai. Approval/indexing/traffic ki guarantee nahi di jati.
+
 ---
 
 ## 7. Routes
@@ -271,7 +286,8 @@ Pehli baar deploy ke baad:
 | `/category/<name>` | Category listing |
 | `/post/<slug>` | Article (ads, sources, share, schema) |
 | `/search?q=` | Site search (noindex) |
-| `/cards`, `/card/<id>` | Thumbnail-style card posts (default noindex) |
+| `/cards`, `/card/<id>` | Thumbnail-style card posts. 3+ points + https image + source = auto index + JSON-LD + sitemap; warna noindex |
+| `/subscribe` | Newsletter single opt-in (footer form, honeypot, no account) |
 | `/img/<id>.jpg` | D1 me stored AI image (1 year immutable cache) |
 | `/about`, `/author`, `/editorial-policy`, `/contact`, `/corrections`, `/privacy-policy`, `/terms`, `/disclaimer` | Trust pages (AdSense ke liye zaroori) |
 | `/sitemap.xml`, `/news-sitemap.xml`, `/feed.xml`, `/robots.txt`, `/ads.txt` | SEO / ads |
@@ -283,6 +299,8 @@ Pehli baar deploy ke baad:
 | `/admin/new` | Manual draft |
 | `/admin/ai-test` | AI provider test |
 | `/admin/autoheal` | Auto-heal agent: topic cleanup preview/confirm, thin draft heal, missing metadata fix, run log |
+| `/admin/adsense` | AdSense readiness: exact missing secrets + content checks + manual steps (approval guarantee nahi) |
+| `/admin/subscribers`, `/admin/subscribers.csv` | Newsletter list + CSV export |
 | `/admin/api-status` | Per-provider usage / cooldown / limits |
 
 ---
@@ -359,9 +377,17 @@ Safety rules jo code me already hain:
 - **Business mode ka extra gate:** article me plain-language setup (headline hi padha ho to bhi samajh aaye),
   named framework, unit economics/cash engine, **worked example**, strong counterpoint, operator playbook,
   risks, **result/outcome**, "what is not confirmed" aur final analysis hona chahiye (10 sections, 1200+ words).
+  Business topics ab 4 categories me aate hain: **market education**, **new business plan**, **founder/businessman
+  case study** aur **company/model explainer**. Har category ka apna evidence rule hai (plan = startup cost +
+  break-even; founder = dated timeline; market = risk/cost/downside, never a tip). Category-specific evidence
+  missing ho to gate warning deta hai.
   Worked example ya result section missing ho to gate `ok=false` — sirf headings ka joda hona kaafi nahi.
   Guarantee/risk-free/get-rich language aur stock tips (`buy`, `target price`, `multibagger`) hard-block hain.
   Calculation tabhi allowed hai jab `A / B = C` ke inputs sources me hon aur arithmetic sahi ho (`derivedNumbers`).
+- **Source trust (0 token):** `sourcetrust.js` har link ko rank karta hai — official/regulator/exchange >
+  financial press > general press > company claim > reference/blog/aggregator. Sources prompt me trust order me
+  jaate hain, `check_json.sourceTrust` me summary save hoti hai, aur weak sources par review page warning +
+  strict auto-publish block milta hai. Ye "sach/jhooth" ka verdict nahi, evidence ka weight hai.
 - Business articles par public "Business analysis, not investment advice" box har article me dikhta hai.
 
 ---
@@ -372,14 +398,19 @@ Safety rules jo code me already hain:
 npm test
 ```
 
-366 tests in 23 files (`preread`, `validate`, `writer`, `editor`, `playbook`, `verify`, `facts`, `cardpost`, `media`,
-`trends`, `ai`, `api-manager`, `seo-optimizer`, `index`, `claims`, `similarity`, `style`, `debate`, `quality-layers`, `business`, `autodraft`, `deepen`, `autoheal`). Sab pure functions / fake KV / fake fetch -
+418 tests in 100 suites, 24 files (`preread`, `validate`, `writer`, `editor`, `playbook`, `verify`, `facts`, `cardpost`, `media`,
+`trends`, `ai`, `api-manager`, `seo-optimizer`, `index`, `claims`, `similarity`, `style`, `debate`, `quality-layers`, `business`, `sourcetrust`, `autodraft`, `deepen`, `autoheal`). Sab pure functions / fake KV / fake fetch -
 koi network call nahi, koi real DB nahi. `quality-layers` conflicts, originality, specificity, voice, fact
 registry, corrections aur source liveness ko cover karta hai (in-memory SQLite se, network nahi).
-`business` topic bank, hot-topic rotation, frameworks, 10-section prompt, depth gate, derived arithmetic aur
-Business publish rules cover karta hai. `deepen` existing post ka 0-token gap report cover karta hai.
+`business` topic bank, hot-topic rotation, frameworks, 4 article kinds, 10-section prompt, depth gate,
+kind-specific evidence, derived arithmetic aur Business publish rules cover karta hai.
+`sourcetrust` domain ranking, strong/ok/weak summary aur stable sorting cover karta hai. `deepen` existing post
+ka 0-token gap report cover karta hai.
 `autoheal` topic cleanup plan, duplicate normalisation aur metadata repair ko cover karta hai.
-`autodraft` approval-queue cap aur auto-reject rules cover karta hai.
+`autodraft` approval-queue cap aur auto-reject rules cover karta hai. `writer` me `rankDraftAttempt` (best of
+2–4 attempts) aur `api-manager` me Gemini/Cohere message normalization + retry/fallback cover hai.
+`cardpost` auto-index rule, JSON-LD aur sitemap-safe rendering cover karta hai; `index` subscribe form,
+`validEmail` aur `numText` cover karta hai.
 `npm run check` har module import karke toota hua import/syntax pakadta hai.
 
 ---
@@ -400,8 +431,10 @@ Business publish rules cover karta hai. `deepen` existing post ka 0-token gap re
 - **Hindi quality** AI par depend karti hai. Important post khud padh kar edit karo.
 - **Images:** stock photo sirf jab topic clear ho; warna AI illustration. Short/ambiguous
   queries ("DAC", "Free Fire") par real photo jaan-boojh kar nahi lagti (galat photo se bachne ke liye).
-- **Card posts default noindex** hain. Unhe index karana ho to `CARD_INDEX=1` + unique content.
-- **Koi user account / comments / newsletter nahi.** Sab kuch anonymous + static.
+- **Card posts:** 3+ points + https image + named source wale cards auto index hote hain (JSON-LD + sitemap).
+  Patle cards noindex rehte hain. `CARD_INDEX=1/0` se force override.
+- **Koi user account / comments nahi.** Newsletter single opt-in hai (footer form + `/subscribe` + CSV export);
+  accounts/comments spam, moderation aur AdSense thin-content risk ki wajah se jaan-boojh kar nahi.
 - **Free tier limits:** Workers AI neurons, D1 rows, KV writes — bade traffic par
   paid plan ya caching strategy chahiye hogi.
 - **3 deep business articles/day free AI keys par realistic upper bound hai.** Ek article me
