@@ -59,13 +59,22 @@ const CAT_Q = {
 };
 const DEFAULT_Q = 'news studio background';
 const PEOPLE = /\b(man|men|woman|women|person|people|boy|girl|child|children|kid|kids|portrait|face|couple|family|worker|workers|student|students|crowd|businessman|businesswoman|lady|guy|player|players|athlete)\b/i;
+// Words that describe the article, not the picture. Searching Pexels for "explained guide" returns
+// random slides/whiteboards, so they are removed before a stock search.
+const QUERY_STOP = new Set(('the and for with from this that how what why when where who which ' +
+  'explained explain explainer guide basics basic beginners beginner meaning definition analysis ' +
+  'vs versus today latest news update review full detail details complete simple easy').split(' '));
 export const genericQuery = (category) => CAT_Q[category] || DEFAULT_Q;
 // Latin shabd (jaise "ipad mini") ho to wahi, warna category ki English query (Pexels Hindi nahi samajhta).
 // One Latin word ("DAC") is too ambiguous for stock search -> use the category image instead.
 export const stockQuery = (query, category) => {
-  const latin = String(query || '').match(/[A-Za-z]{3,}/g) || [];
+  const latin = (String(query || '').match(/[A-Za-z]{2,}/g) || [])
+    .filter((w) => w.length >= 3 && !QUERY_STOP.has(w.toLowerCase()));
   return latin.length >= 2 ? latin.slice(0, 4).join(' ') : genericQuery(category);
 };
+// A topic with no usable English keywords gets a generic category photo. Callers use this to try the
+// AI illustration first instead of a random stock image.
+export const topicAmbiguous = (query, category) => stockQuery(query, category) === genericQuery(category);
 export async function findPexels(env, query, category) {
   if (!env || !env.PEXELS_API_KEY) return null;
   const q = stockQuery(query, category);
@@ -78,10 +87,9 @@ export async function findPexels(env, query, category) {
   for (const p of j.photos || []) {
     const alt = String(p.alt || '');
     if (!alt || PEOPLE.test(alt)) continue;                       // alt nahi ya insaan = skip
-    if (!generic) {
-      const hits = qw.filter((w) => alt.toLowerCase().includes(w)).length;
-      if (!qw.length || hits / qw.length < 0.6) continue;         // photo sach mein usi ke baare mein ho
-    }
+    const hits = qw.filter((w) => alt.toLowerCase().includes(w)).length;
+    if (!qw.length || (!generic && hits / qw.length < 0.6)) continue; // photo sach mein usi ke baare mein ho
+    if (generic && hits === 0) continue;                           // generic bhi topic se thoda mile
     const url2 = p.src && (p.src.large2x || p.src.large);
     if (url2) return { url: url2, credit: `${String(p.photographer || 'Pexels').slice(0, 60)} / Pexels` };
   }
@@ -188,7 +196,8 @@ export async function addMedia(env, postId, o = {}) {
   try {
     if (o.force || !cur.image_url) {
       const tags = o.tags || [];
-      const aiFirst = env.THUMB_MODE === 'ai';
+      const ambiguous = topicAmbiguous(query || tags[0] || '', o.category);
+      const aiFirst = env.THUMB_MODE === 'ai' || (ambiguous && env.THUMB_MODE !== 'photo');
       const tryAI = () => aiThumbnail(env, { query: query || tags[0], title: o.title, category: o.category }).catch((e) => { out.image = 'AI image error: ' + String(e.message).slice(0, 60); return null; });
       const tryStock = async () => {
         const qs = [stockQuery(query || tags[0] || '', o.category), genericQuery(o.category)].filter((q, i, a) => q && a.indexOf(q) === i);

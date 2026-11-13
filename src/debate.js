@@ -1,7 +1,7 @@
 // debate.js — safe multi-AI discussion + cross-checking.
 //
 // Aaj Tak style "har party ka neta bahas karta hai" ka SAFE version:
-//   * roles are neutral analysts (Reporter / Analyst / Skeptic), never real politicians,
+//   * roles are neutral analysts (Reporter / Analyst / Skeptic / Source Verifier), never real politicians,
 //   * no AI is allowed to put words / quotes in a real person's mouth,
 //   * every role must attach the exact source line (EVIDENCE) to every claim,
 //   * a Judge AI cross-examines the three roles and returns one final claim list,

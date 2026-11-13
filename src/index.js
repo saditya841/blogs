@@ -4,7 +4,7 @@ import { isBusinessMode } from './business.js';
 import { runAI } from './ai.js';
 import { writeOne, dayStartIST } from './writer.js';
 import { cardOne } from './card.js';
-import { writeCardPost, renderCardPage, renderCardsList } from './cardpost.js';
+import { writeCardPost, renderCardPage, renderCardsList, cardIndexable } from './cardpost.js';
 import { addMedia, makeHook } from './media.js';
 import { validatePost } from './validate.js';
 import { handleAPIStatus } from './admin-api-status.js';
@@ -24,7 +24,9 @@ const LIVE = "status='approved' AND publish_at<=?";
 const PER_PAGE = 12;
 
 const HDR = { 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'strict-origin-when-cross-origin', 'X-Frame-Options': 'SAMEORIGIN' };
-const html = (s, status = 200, cache = true) => new Response(s, { status, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': cache && status === 200 ? 'public, max-age=300, s-maxage=600' : 'no-store', ...HDR } });
+// stale-while-revalidate: Cloudflare serves the cached page instantly while it refreshes in the
+// background, so a free-tier cold start or AI timeout never shows visitors a slow/blank page.
+const html = (s, status = 200, cache = true) => new Response(s, { status, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': cache && status === 200 ? 'public, max-age=300, s-maxage=600, stale-while-revalidate=86400' : 'no-store', ...HDR } });
 const xml = (s) => new Response(s, { headers: { 'Content-Type': 'application/xml; charset=utf-8', 'Cache-Control': 'public, max-age=600', ...HDR } });
 const go = (loc, headers = {}) => new Response(null, { status: 303, headers: { Location: loc, 'Cache-Control': 'no-store', ...headers } });
 // Accepts "pub-...", "ca-pub-..." or just the digits, and returns "pub-...".
@@ -49,6 +51,9 @@ article h1{font-size:28px;line-height:1.3;margin:8px 0}article h2{font-size:22px
 .vid{position:relative;aspect-ratio:16/9}iframe{position:absolute;inset:0;width:100%;height:100%;border:0;border-radius:10px}.pg{display:flex;justify-content:space-between;margin:16px 0}
 input,textarea,button,select{width:100%;padding:10px;margin:6px 0;font:inherit;border:1px solid #bbb;border-radius:8px}button{background:#0b3d91;color:#fff;border:0;cursor:pointer}button.r{background:#b3261e}button.g{background:#2e7d32}button.o{background:#6b6b6b}
 .tag{display:inline-block;padding:1px 8px;border-radius:99px;background:#eee;font-size:12px}footer{color:#666;font-size:14px;padding:22px 14px;text-align:center}footer a{margin:0 6px}form.s{display:flex;gap:6px}form.s input{margin:0}form.s button{width:auto}
+.nl{max-width:540px;margin:0 auto 16px;background:#fff;border:1px solid #e4e6ea;border-radius:12px;padding:12px 14px;text-align:left}
+.nl b{display:block;font-size:15px;color:#111}.nl p{margin:2px 0 8px;font-size:13px;line-height:1.5}
+.nl form{display:flex;gap:6px;margin:0}.nl input[type=email]{margin:0;flex:1;width:auto;min-width:0}.nl .hp{position:absolute;left:-9999px;width:1px;height:1px;opacity:0;overflow:hidden}.nl button{width:auto;white-space:nowrap;margin:0}
 .adwrap{margin:20px 0;min-height:90px}
 .poster{position:relative;display:flex;flex-direction:column;justify-content:space-between;gap:10px;aspect-ratio:16/9;padding:14px 16px;color:#fff;overflow:hidden}.poster:before{content:"";position:absolute;inset:0;background:radial-gradient(circle at 88% 12%,rgba(255,255,255,.25),transparent 45%),radial-gradient(circle at 8% 100%,rgba(0,0,0,.35),transparent 55%)}.poster>*{position:relative}
 .poster .pc{align-self:flex-start;background:rgba(255,255,255,.2);border:1px solid rgba(255,255,255,.5);border-radius:99px;padding:2px 12px;font-size:12px;font-weight:700;letter-spacing:.6px;text-transform:uppercase}
@@ -78,7 +83,7 @@ ${o.canonical ? `<meta property="og:url" content="${esc(o.canonical)}">` : ''}${
 <header><div class="w"><a class="logo" href="${o.admin ? '/admin' : '/'}">${esc(name)}${o.admin ? ' Admin' : ''}</a>
 ${o.admin ? '' : `<nav>${cats.map((c) => `<a href="/category/${encodeURIComponent(c.category)}">${esc(c.category)}</a>`).join('')}</nav>`}</div></header>
 <main class="w">${o.admin ? '' : `<form class="s" action="/search" method="get" role="search"><input name="q" placeholder="Search..." aria-label="Search"><button>Go</button></form>`}${body}</main>
-<footer>${o.admin ? '' : `<div><a href="/about">About</a><a href="/author">Author</a><a href="/editorial-policy">Editorial Policy</a><a href="/corrections">Corrections</a><a href="/contact">Contact</a><a href="/privacy-policy">Privacy</a><a href="/terms">Terms</a><a href="/disclaimer">Disclaimer</a><a href="/feed.xml">RSS</a></div>`}
+<footer>${o.admin ? '' : `<div class="nl"><b>Free business analysis, email me</b><p>New company breakdowns and business models — no spam, unsubscribe anytime.</p><form method="post" action="/subscribe"><input class="hp" type="text" name="website" tabindex="-1" autocomplete="off" aria-hidden="true" placeholder="Website"><input type="email" name="email" required maxlength="254" placeholder="you@example.com" aria-label="Email address"><button>Subscribe</button></form></div><div><a href="/about">About</a><a href="/author">Author</a><a href="/editorial-policy">Editorial Policy</a><a href="/corrections">Corrections</a><a href="/contact">Contact</a><a href="/privacy-policy">Privacy</a><a href="/terms">Terms</a><a href="/disclaimer">Disclaimer</a><a href="/feed.xml">RSS</a></div>`}
 <div>&copy; ${new Date().getUTCFullYear()} ${esc(name)}</div></footer></body></html>`;
 }
 
@@ -94,6 +99,16 @@ function renderBody(text, adHtml = '') {
   return { html: out.join('\n'), h2s };
 }
 const words = (t) => String(t || '').trim().split(/\s+/).filter(Boolean).length;
+// Never print "undefined shabd" in the admin panel, even if an older return shape lacks the field.
+const numText = (n) => (Number.isFinite(Number(n)) ? Number(n) : 0);
+export { numText };
+// Newsletter: single opt-in, one email per address, no account and no password. The footer form is the only
+// public write; the admin page can export the list. A honeypot field stops most bots without a captcha.
+export const validEmail = (s) => {
+  const v = String(s || '').trim();
+  return v.length >= 5 && v.length <= 254 && /^[^\s@]+@[^\s@]+\.[A-Za-z]{2,}$/.test(v);
+};
+const ensureSubscribers = (env) => env.DB.prepare("CREATE TABLE IF NOT EXISTS subscribers (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL UNIQUE COLLATE NOCASE, source TEXT, created_at INTEGER NOT NULL, unsubscribed INTEGER NOT NULL DEFAULT 0)").run();
 const ytId = (u) => { const m = String(u || '').match(/(?:youtu\.be\/|v=|embed\/)([\w-]{11})/); return m ? m[1] : null; };
 // Readable URL slug. Hindi (Devanagari) titles used to become "post-xxxxx", which is bad for SEO:
 // Google supports Unicode URLs, so we keep the letters of any script and only replace punctuation.
@@ -157,7 +172,7 @@ function staticPage(env, key) {
     'editorial-policy': ['Editorial Policy', `<h2>How articles are made</h2><p>Topics come from public trend data and a curated business topic list. For each topic we collect reporting from independent public sources (news outlets; for business explainers we may also use Wikipedia for background only). Then we draft an original article in our own words. Drafts are produced with the help of AI tools, checked claim-by-claim against the collected sources, tested for similarity to those sources, and then approved by a person or by our automated quality gate before they go live.</p><h2>Business content</h2><p>Business articles explain models, unit economics and industry structure. They are analysis, not investment advice. We do not publish stock tips, buy or sell recommendations, target prices or guaranteed returns. Where data is missing or unconfirmed, the article says so.</p><h2>What we do not do</h2><p>We do not copy text from other websites, publish unverified rumours as facts, or invent quotes. If sources disagree, we say so.</p><h2>Images and video</h2><p>Images come from openly licensed libraries and are credited under the picture. Videos are embedded from the original publisher.</p><h2>Corrections</h2><p>If you find an error, email <a href="mailto:${mail}">${mail}</a> with the page link. Confirmed errors are corrected quickly and the page is updated.</p>`],
     'contact': ['Contact Us', `<p>For corrections, copyright concerns, advertising or any feedback, email us at <a href="mailto:${mail}">${mail}</a>. We usually reply within 2-3 working days.</p>`],
     'author': ['Author & Editorial Desk', `<p><b>${esc(env.AUTHOR_NAME || 'Virall Editorial Desk')}</b> is the byline used by the ${n} editorial desk. A real person on the desk reads every draft before it goes live, checks three random facts against the linked sources, edits the article where needed, and only then approves it.</p><h2>How we work</h2><p>We use AI tools for the first draft and for cross-checking, but code - not AI - decides whether a claim is supported by the sources. Drafts that fail the check stay unpublished. If you want to know exactly what was checked, every article links its sources and shows a "Kya confirm nahi hai" box for details we could not establish.</p><h2>Corrections</h2><p>Errors are corrected with a dated update note. See all recent corrections on the <a href="/corrections">corrections page</a>, or email <a href="mailto:${mail}">${mail}</a>.</p><h2>Contact</h2><p>Editorial desk: <a href="mailto:${mail}">${mail}</a></p>`],
-    'privacy-policy': ['Privacy Policy', `<p>Last updated: ${esc(env.POLICY_UPDATED || '2026-11-08')}. This policy explains what information ${n} (${s}) handles when you visit.</p><h2>Information we collect</h2><p>We do not ask visitors to create accounts. Our servers and hosting provider (Cloudflare) may log technical data such as IP address, browser type and pages visited, for security and performance.</p><h2>Cookies and advertising</h2><p>We may show ads served by Google AdSense. Google and its partners use cookies to serve ads based on your visits to this and other sites. You can opt out of personalised advertising at <a href="https://www.google.com/settings/ads">google.com/settings/ads</a>, and learn how Google uses data at <a href="https://policies.google.com/technologies/partner-sites">policies.google.com/technologies/partner-sites</a>. Where required by law (for example in the EEA and UK), consent is requested before personalised ads are shown.</p><h2>Third-party content</h2><p>Some pages embed YouTube videos (privacy-enhanced mode). Those services may set their own cookies when you play a video. Links to other sites are not under our control.</p><h2>Children</h2><p>This site is not directed at children under 13.</p><h2>Contact</h2><p><a href="mailto:${mail}">${mail}</a></p>`],
+    'privacy-policy': ['Privacy Policy', `<p>Last updated: ${esc(env.POLICY_UPDATED || '2026-11-08')}. This policy explains what information ${n} (${s}) handles when you visit.</p><h2>Information we collect</h2><p>We do not ask visitors to create accounts. Our servers and hosting provider (Cloudflare) may log technical data such as IP address, browser type and pages visited, for security and performance.</p><h2>Newsletter</h2><p>If you subscribe, we store the email address you enter and the subscription date, only to send new business analysis. We do not sell or share it. Every email includes an unsubscribe link, and you can email <a href="mailto:${mail}">${mail}</a> to have your address deleted.</p><h2>Cookies and advertising</h2><p>We may show ads served by Google AdSense. Google and its partners use cookies to serve ads based on your visits to this and other sites. You can opt out of personalised advertising at <a href="https://www.google.com/settings/ads">google.com/settings/ads</a>, and learn how Google uses data at <a href="https://policies.google.com/technologies/partner-sites">policies.google.com/technologies/partner-sites</a>. Where required by law (for example in the EEA and UK), consent is requested before personalised ads are shown.</p><h2>Third-party content</h2><p>Some pages embed YouTube videos (privacy-enhanced mode). Those services may set their own cookies when you play a video. Links to other sites are not under our control.</p><h2>Children</h2><p>This site is not directed at children under 13.</p><h2>Contact</h2><p><a href="mailto:${mail}">${mail}</a></p>`],
     'terms': ['Terms of Use', `<p>By using ${n} you agree to these terms. Content is provided for general information. You may share links and short excerpts with credit and a link back; you may not republish full articles without permission. We may change or remove content at any time. Use of the site is at your own risk.</p>`],
     'disclaimer': ['Disclaimer', `<p>Information on ${n} is compiled from public sources and is provided for general information only. It is not legal, financial, medical or investment advice. We try to keep articles accurate but cannot guarantee completeness. Please verify important details from official sources before acting on them.</p>`],
   }[key];
@@ -354,15 +369,47 @@ export default {
     const url = new URL(req.url), p = url.pathname.replace(/\/+$/, '') || '/', site = env.SITE_URL || url.origin;
     const t = now();
 
-    if (p === '/robots.txt') return new Response(`User-agent: *\nAllow: /\nDisallow: /admin\nDisallow: /search\n\nSitemap: ${site}/sitemap.xml\nSitemap: ${site}/news-sitemap.xml\n`, { headers: { 'Content-Type': 'text/plain' } });
+    if (p === '/robots.txt') return new Response(`User-agent: *\nAllow: /\nDisallow: /admin\nDisallow: /search\nDisallow: /subscribe\n\nSitemap: ${site}/sitemap.xml\nSitemap: ${site}/news-sitemap.xml\n`, { headers: { 'Content-Type': 'text/plain' } });
     if (p === '/ads.txt') { const pub = adsPub(env); return new Response(pub ? `google.com, ${pub}, DIRECT, f08c47fec0942fa0\n` : '# set ADSENSE_PUB\n', { headers: { 'Content-Type': 'text/plain' } }); }
+
+    // Newsletter subscribe (public, no account). Honeypot + strict email check; never reveals whether an
+    // address already exists, so the form cannot be used to test email lists.
+    if (p === '/subscribe' && req.method === 'POST') {
+      try {
+        const f = await req.formData();
+        if (String(f.get('website') || '').trim()) return go('/subscribe?ok=1'); // bot filled the hidden field
+        const email = String(f.get('email') || '').trim().toLowerCase();
+        if (!validEmail(email)) return go('/subscribe?err=email');
+        await ensureSubscribers(env);
+        await env.DB.prepare('INSERT INTO subscribers(email,source,created_at) VALUES(?,?,?) ON CONFLICT(email) DO NOTHING').bind(email, 'site', t).run();
+        return go('/subscribe?ok=1');
+      } catch (e) {
+        console.error('subscribe failed:', e && e.message);
+        return go('/subscribe?err=1');
+      }
+    }
+    if (p === '/subscribe') {
+      const ok = url.searchParams.get('ok') === '1', err = url.searchParams.get('err');
+      const body = ok
+        ? '<h1>Subscribed</h1><p>Ho gaya — naye business breakdowns email par aayenge. Har email me unsubscribe link hoga.</p><p><a href="/">Wapas home</a></p>'
+        : err
+          ? `<h1>Email check karo</h1><p>${err === 'email' ? 'Yeh email address valid nahi lag raha.' : 'Abhi save nahi hua. Thodi der baad dobara try karo.'}</p><p><a href="/">Wapas home</a></p>`
+          : '<h1>Newsletter</h1><p>Naye business breakdowns email par. Sirf email address chahiye — koi account nahi.</p><form method="post" action="/subscribe"><input type="email" name="email" required maxlength="254" placeholder="you@example.com"><input type="text" name="website" tabindex="-1" autocomplete="off" aria-hidden="true" style="position:absolute;left:-9999px"><button>Subscribe</button></form>';
+      return html(layout(env, { title: 'Newsletter', desc: 'Free business analysis by email — unsubscribe anytime.', noindex: true }, `<article>${body}</article>`));
+    }
+
     if (env.INDEXNOW_KEY && p === `/${env.INDEXNOW_KEY}.txt`) return new Response(env.INDEXNOW_KEY, { headers: { 'Content-Type': 'text/plain' } });
 
     if (p === '/sitemap.xml') {
       const { results } = await env.DB.prepare(`SELECT slug,image_url,publish_at,updated_at FROM posts WHERE ${LIVE} ORDER BY publish_at DESC LIMIT 5000`).bind(t).all();
       const cats = await env.DB.prepare(`SELECT DISTINCT category FROM posts WHERE ${LIVE} AND category IS NOT NULL AND category!=''`).bind(t).all();
+      // Card pages are noindex by default. Only cards that pass the substance rule (3+ points,
+      // https image, named source) are listed, so the sitemap never advertises thin pages.
+      const cardRows = (await env.DB.prepare("SELECT id,research,updated_at FROM topics WHERE status='card_live' ORDER BY updated_at DESC LIMIT 1000").all()).results
+        .map((r) => { let d = {}; try { d = JSON.parse(r.research || '{}'); } catch {} return { id: r.id, post: d.post, updated_at: r.updated_at }; })
+        .filter((r) => r.post && cardIndexable(env, r.post));
       const st = ['about', 'editorial-policy', 'contact', 'privacy-policy', 'terms', 'disclaimer', 'author', 'corrections'];
-      return xml(`<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:image="http://www.google.com/schemas/sitemap-image/1.1"><url><loc>${site}/</loc></url>${st.map((s) => `<url><loc>${site}/${s}</loc></url>`).join('')}${cats.results.map((c) => `<url><loc>${site}/category/${encodeURIComponent(c.category)}</loc></url>`).join('')}${results.map((r) => `<url><loc>${esc(site + postHref(r.slug))}</loc><lastmod>${new Date((r.updated_at || r.publish_at) * 1000).toISOString()}</lastmod>${okImg(r.image_url) ? `<image:image><image:loc>${esc(r.image_url)}</image:loc></image:image>` : ''}</url>`).join('')}</urlset>`);
+      return xml(`<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:image="http://www.google.com/schemas/sitemap-image/1.1"><url><loc>${site}/</loc></url>${st.map((s) => `<url><loc>${site}/${s}</loc></url>`).join('')}${cats.results.map((c) => `<url><loc>${site}/category/${encodeURIComponent(c.category)}</loc></url>`).join('')}${results.map((r) => `<url><loc>${esc(site + postHref(r.slug))}</loc><lastmod>${new Date((r.updated_at || r.publish_at) * 1000).toISOString()}</lastmod>${okImg(r.image_url) ? `<image:image><image:loc>${esc(r.image_url)}</image:loc></image:image>` : ''}</url>`).join('')}${cardRows.map((r) => `<url><loc>${site}/card/${Number(r.id)}</loc><lastmod>${new Date((r.updated_at || t) * 1000).toISOString()}</lastmod>${okImg(r.post.image_url) ? `<image:image><image:loc>${esc(r.post.image_url)}</image:loc></image:image>` : ''}</url>`).join('')}</urlset>`);
     }
     if (p === '/feed.xml') {
       const { results } = await env.DB.prepare(`SELECT slug,title,summary,publish_at FROM posts WHERE ${LIVE} ORDER BY publish_at DESC LIMIT 50`).bind(t).all();
@@ -529,6 +576,69 @@ async function admin(req, env, p, url) {
   // Multi-API status dashboard (was imported but never routed)
   if (p === '/admin/api-status') return handleAPIStatus(env);
 
+  // Newsletter list + CSV (single opt-in; no accounts, no passwords).
+  if (p === '/admin/subscribers' || p === '/admin/subscribers.csv') {
+    await ensureSubscribers(env).catch(() => {});
+    const rows = (await env.DB.prepare('SELECT email,source,created_at,unsubscribed FROM subscribers ORDER BY id DESC LIMIT 2000').all().catch(() => ({ results: [] }))).results || [];
+    if (p === '/admin/subscribers.csv') {
+      const cell = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+      const csv = '\uFEFF' + ['email,source,subscribed_at,status', ...rows.map((r) => [
+        cell(r.email), cell(r.source || ''), new Date((Number(r.created_at) || 0) * 1000).toISOString(), r.unsubscribed ? 'unsubscribed' : 'subscribed'
+      ].join(','))].join('\r\n');
+      return new Response(csv, { headers: { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': 'attachment; filename="subscribers.csv"', 'Cache-Control': 'no-store', ...HDR } });
+    }
+    const active = rows.filter((r) => !r.unsubscribed).length;
+    const list = rows.length
+      ? `<div class="card"><div class="p"><table style="width:100%;border-collapse:collapse;font-size:14px"><tr><th align="left">Email</th><th align="left">Source</th><th align="left">Date</th><th align="left">Status</th></tr>${rows.slice(0, 500).map((r) => `<tr><td>${esc(r.email)}</td><td>${esc(r.source || '-')}</td><td>${day(Number(r.created_at) || 0)}</td><td>${r.unsubscribed ? 'unsubscribed' : 'subscribed'}</td></tr>`).join('')}</table>${rows.length > 500 ? `<p class="m">Sirf 500 dikh rahe hain; CSV me sab ${rows.length} hain.</p>` : ''}</div></div>`
+      : '<p>Abhi koi subscriber nahi. Public pages ke footer me form hai.</p>';
+    return A('Subscribers', `<p><a href="/admin">← Admin</a> | <a href="/admin/adsense">AdSense status</a></p><h1>Newsletter subscribers</h1><p><b>${numText(active)}</b> active / ${numText(rows.length)} total. Single opt-in, koi account nahi.</p><form method="get" action="/admin/subscribers.csv"><button class="g">CSV download karo (${numText(rows.length)})</button></form>${list}`, 200);
+  }
+
+  // AdSense readiness: exact missing env/checks, no fake "approved" claim.
+  if (p === '/admin/adsense') {
+    const pub = adsPub(env), slot = String(env.ADSENSE_SLOT || '').trim();
+    let c = { approved: 0, long: 0, business: 0, sourced: 0, images: 0, drafts: 0, subscribers: 0, cards: 0 };
+    let dbErr = '';
+    try {
+      const one = async (sql) => Number((await env.DB.prepare(sql).first()).c) || 0;
+      c.approved = await one("SELECT COUNT(*) c FROM posts WHERE status='approved'");
+      c.long = await one("SELECT COUNT(*) c FROM posts WHERE status='approved' AND (COALESCE(word_count,0)>=600 OR LENGTH(body)>=3500)");
+      c.business = await one("SELECT COUNT(*) c FROM posts WHERE status='approved' AND category='Business'");
+      c.sourced = await one("SELECT COUNT(*) c FROM posts WHERE status='approved' AND sources IS NOT NULL AND LENGTH(sources)>10");
+      c.images = await one("SELECT COUNT(*) c FROM posts WHERE status='approved' AND image_url LIKE 'https://%'");
+      c.drafts = await one("SELECT COUNT(*) c FROM posts WHERE status='draft'");
+      const cardRows = (await env.DB.prepare("SELECT id,research FROM topics WHERE status='card_live' LIMIT 1000").all()).results || [];
+      c.cards = cardRows.filter((r) => { let d = {}; try { d = JSON.parse(r.research || '{}'); } catch {} return d.post && cardIndexable(env, d.post); }).length;
+      await ensureSubscribers(env);
+      c.subscribers = await one('SELECT COUNT(*) c FROM subscribers WHERE unsubscribed=0');
+    } catch (e) { dbErr = String(e && e.message).slice(0, 160); }
+    const autoPub = (await getSetting(env, 'auto_publish')) === '1';
+    const policyOk = true; // /about, /privacy-policy, /terms, /disclaimer, /contact are code pages in this Worker
+    const checks = [
+      { ok: !!pub && /^pub-\d{8,}$/.test(pub), label: 'ADSENSE_PUB secret', want: 'Cloudflare → Variables and Secrets me ADSENSE_PUB = pub-XXXXXXXXXXXXXXXX' },
+      { ok: !!slot, label: 'ADSENSE_SLOT unit id', want: 'AdSense dashboard se ek display ad unit banao aur ADSENSE_SLOT me number daalo' },
+      { ok: c.approved >= 20, label: `20+ approved articles (${c.approved})`, want: `${Math.max(0, 20 - c.approved)} aur solid articles approve karo (20-30 content depth ka internal target hai, Google ka official minimum nahi)` },
+      { ok: c.long >= 15, label: `15+ long articles 600+ words (${c.long})`, want: 'Thin content AdSense ke liye sabse bada risk hai. Chhote posts ko Deepen karo ya noindex rakho.' },
+      { ok: c.business >= 10, label: `10+ Business articles (${c.business})`, want: 'Site ka focus clear karo: share-market education, business plans aur founder case studies.' },
+      { ok: c.sourced >= 15, label: `15+ articles with listed sources (${c.sourced})`, want: 'Har article ke sources dikhne chahiye (E-E-A-T).' },
+      { ok: c.images >= 15, label: `15+ articles with an https image (${c.images})`, want: 'Image missing posts ko /admin/post/<id> se "Image refresh" karo.' },
+      { ok: policyOk, label: 'About / Privacy / Terms / Disclaimer / Contact', want: 'Code me maujood hain' },
+      { ok: String(env.SITE_URL || '').startsWith('https://'), label: 'SITE_URL is https', want: 'SITE_URL=https://virall.in set karo' },
+      { ok: !!String(env.CONTACT_EMAIL || '').trim(), label: 'CONTACT_EMAIL set', want: 'CONTACT_EMAIL tumhara asli email hona chahiye' },
+      { ok: !autoPub, label: 'Auto-publish OFF (recommended)', want: 'AdSense se pehle auto-publish band rakho; har post human review se jaye.' },
+    ];
+    const pass = checks.filter((x) => x.ok).length;
+    const missing = checks.filter((x) => !x.ok);
+    const rows = checks.map((x) => `<tr><td>${x.ok ? '✅' : '❌'}</td><td>${esc(x.label)}</td><td class="m">${esc(x.ok ? '' : x.want)}</td></tr>`).join('');
+    const extra = c.drafts ? `<p class="m">Draft queue me ${c.drafts} posts hain — inhe review/approve ya reject karo, published ke saath mix mat karo.</p>` : '';
+    return A('AdSense', `<p><a href="/admin">← Admin</a> | <a href="/admin/subscribers">Subscribers</a></p><h1>AdSense readiness</h1>
+<p class="note"><b>Honest baat:</b> ye page sirf technical + content checklist dikhata hai. AdSense approval, indexing aur traffic guaranteed nahi hote — final decision Google karta hai. Yahan 100% score ka matlab bhi approval ki guarantee nahi.</p>
+<p><b>${pass}/${checks.length}</b> checks pass (${Math.round((pass / checks.length) * 100)}%). ${missing.length ? `<b>${missing.length} missing:</b> ${esc(missing.map((x) => x.label).join(', '))}` : 'Sab code-side checks pass hain.'}</p>${dbErr ? `<p class="note">DB error: ${esc(dbErr)}</p>` : ''}
+<div class="card"><div class="p"><table style="width:100%;border-collapse:collapse;font-size:14px">${rows}</table></div></div>
+<div class="card"><div class="p"><b>Manual steps (Google ke paas)</b><ol><li>Site ko Cloudflare par deploy karo aur <code>https://virall.in</code> khulna check karo.</li><li><code>/ads.txt</code> kholo — usme <code>google.com, ${esc(pub || 'pub-...')}, DIRECT, f08c47fec0942fa0</code> dikhna chahiye.</li><li>Search Console me site verify karo, <code>/sitemap.xml</code> submit karo, Indexing > URL Inspection se 5-10 important posts manually index karwao.</li><li>AdSense account me site add karke review request bhejo. Review me din/hafte lag sakte hain; reject ho to thin content aur policy pages dobara check karo.</li><li>Approve hone ke baad <code>ADSENSE_PUB</code> + <code>ADSENSE_SLOT</code> secrets set karo, phir deploy karo. Ads sirf 600+ word posts par lagenge.</li></ol><p class="m">Cards: ${c.cards} indexable (3+ points + image + source). Newsletter: ${c.subscribers} active subscriber. Ads.txt: <a href="/ads.txt" target="_blank">/ads.txt</a> · Sitemap: <a href="/sitemap.xml" target="_blank">/sitemap.xml</a></p></div></div>
+<div class="card"><div class="p"><b>Traffic reality</b><p class="m">AdSense earning pageviews × RPM par chalti hai. Indian business niche me roughly ₹15–60 RPM (1,000 pageviews) ka common range hai — approval ke bina earning zero. Pehle 20-30 strong articles + internal links + Search Console indexing par focus karo; koi "guaranteed traffic" trick nahi hai.</p></div></div>`, 200);
+  }
+
   if (p === '/admin/setting' && req.method === 'POST') {
     const f = await req.formData(), k = String(f.get('k') || '');
     if (k === 'auto_write' || k === 'auto_publish') await setSetting(env, k, f.get('v') === '1' ? '1' : '0');
@@ -566,7 +676,7 @@ async function admin(req, env, p, url) {
   if (p === '/admin/write' && req.method === 'POST') {
     try {
       const r = await writeOne(env);
-      if (r.ok && r.postId) return go('/admin/post/' + r.postId + '?msg=' + encodeURIComponent(`Draft ban gaya: ${r.title} (score ${r.score}, ${r.words} shabd). Neeche padh kar Approve karo.`));
+      if (r.ok && r.postId) return go('/admin/post/' + r.postId + '?msg=' + encodeURIComponent(`Draft ban gaya: ${r.title} (score ${r.score}, ${numText(r.words)} shabd). Neeche padh kar Approve karo.`));
       const tok = r.spent === false ? ' | Token kharch nahi hua' : r.spent ? ' | Token laga' : '';
       return go('/admin/topics?msg=' + encodeURIComponent('Draft nahi bana: ' + (r.reason || 'unknown') + tok));
     } catch (e) { return go('/admin/topics?msg=' + encodeURIComponent('ERROR: ' + String(e.message).slice(0, 250))); }
@@ -600,7 +710,7 @@ async function admin(req, env, p, url) {
       return go(`/admin/topic/${id}?msg=` + encodeURIComponent('Research fail: ' + String(e.message).slice(0, 250)));
     }
   }
-  // Multi-AI debate preview for one topic (safe Reporter/Analyst/Skeptic + code-checked claim ledger)
+  // Multi-AI debate preview for one topic (safe neutral analyst roles + code-checked claim ledger)
   const dbm = p.match(/^\/admin\/topic\/(\d+)\/debate$/);
   if (dbm && req.method === 'POST') {
     const did = Number(dbm[1]);
@@ -634,7 +744,7 @@ async function admin(req, env, p, url) {
     try { const f = await req.formData(); wlang = String(f.get('lang') || ''); } catch { /* no form body */ }
     try {
       const r = await writeOne(env, { topicId: wid, ...(wlang === 'hi' || wlang === 'en' ? { lang: wlang } : {}) });
-      if (r.ok && r.postId) return go('/admin/post/' + r.postId + '?msg=' + encodeURIComponent(`Draft ban gaya: ${r.title} (score ${r.score}, ${r.words} shabd${r.business ? `, business gate ${r.businessScore}/100` : ''}). Neeche padh kar Approve karo.`));
+      if (r.ok && r.postId) return go('/admin/post/' + r.postId + '?msg=' + encodeURIComponent(`Draft ban gaya: ${r.title} (score ${r.score}, ${numText(r.words)} shabd${r.business ? `, business gate ${r.businessScore}/100` : ''}). Neeche padh kar Approve karo.`));
       const tok = r.spent === false ? ' | Token kharch nahi hua' : r.spent ? ' | Token laga' : '';
       return go('/admin/topic/' + wid + '?msg=' + encodeURIComponent('Draft nahi bana: ' + (r.reason || 'unknown') + tok));
     } catch (e) { return go('/admin/topic/' + wid + '?msg=' + encodeURIComponent('ERROR: ' + String(e.message).slice(0, 250))); }
@@ -654,7 +764,7 @@ async function admin(req, env, p, url) {
     const tid = f.get('topicId') ? Number(f.get('topicId')) : undefined;
     try {
       const r = await writeOne(env, { lang, ...(tid ? { topicId: tid } : {}) });
-      if (r.ok && r.postId) return go('/admin/post/' + r.postId + '?msg=' + encodeURIComponent(`Business draft (${r.lang || lang}) ban gaya: ${r.title} (score ${r.score}, ${r.words} shabd, depth ${r.businessScore ?? '-'} /100). Neeche padh kar Approve karo.`));
+      if (r.ok && r.postId) return go('/admin/post/' + r.postId + '?msg=' + encodeURIComponent(`Business draft (${r.lang || lang}) ban gaya: ${r.title} (score ${r.score}, ${numText(r.words)} shabd, depth ${r.businessScore ?? '-'} /100). Neeche padh kar Approve karo.`));
       const tok = r.spent === false ? ' | Token kharch nahi hua' : r.spent ? ' | Token laga' : '';
       return go('/admin/business?msg=' + encodeURIComponent('Draft nahi bana: ' + (r.reason || 'unknown') + tok));
     } catch (e) { return go('/admin/business?msg=' + encodeURIComponent('ERROR: ' + String(e.message).slice(0, 250))); }
@@ -665,7 +775,7 @@ async function admin(req, env, p, url) {
     const cnt = {};
     for (const r of results) cnt[r.status] = (cnt[r.status] || 0) + 1;
     const cap = Number((isBusinessMode(env) ? env.BUSINESS_DAILY_LIMIT : env.DAILY_POST_LIMIT) || 3);
-    const made = (await env.DB.prepare('SELECT COUNT(*) c FROM posts WHERE created_at>=?').bind(dayStartIST()).first()).c;
+    const made = (await env.DB.prepare("SELECT COUNT(*) c FROM posts WHERE created_at>=? AND category='Business'").bind(dayStartIST()).first()).c;
     const lang = String(env.BUSINESS_LANG || 'en').toLowerCase() === 'hi' ? 'hi' : 'en';
     const rows = results.map((r) => {
       let d = {}; try { d = JSON.parse(r.research || '{}'); } catch {}
@@ -750,7 +860,7 @@ ${msg ? `<p class="note">${esc(msg)}</p>` : ''}
       const r = await healDrafts(env, { limit: 1 });
       const first = (r.results || [])[0];
       const msg = r.healed && first
-        ? `Draft heal ho gaya: ${first.title} (${first.fromWords} → ${first.words} shabd). Review page par padhkar approve karo.`
+        ? `Draft heal ho gaya: ${first.title} (${numText(first.fromWords)} → ${numText(first.words)} shabd). Review page par padhkar approve karo.`
         : `Heal nahi hua: ${(first && first.reason) || r.reason || 'unknown'}`;
       return go('/admin/autoheal?msg=' + encodeURIComponent(msg.slice(0, 300)));
     } catch (e) {
@@ -774,11 +884,12 @@ ${msg ? `<p class="note">${esc(msg)}</p>` : ''}
     const oldReady = (r) => { try { const dd = JSON.parse(r.research || '{}'); return !dd.researched_at || now() - dd.researched_at > 86400; } catch { return true; } };
     const staleReady = results.filter((r) => r.status === 'ready' && oldReady(r)).length;
     const rowTag = (r) => (r.status === 'ready' && oldReady(r) ? ' <span class="tag">refresh</span>' : '');
+    const kindOf = (r) => { try { const dd = JSON.parse(r.research || '{}'); return dd.kind || ''; } catch { return ''; } };
     const counts = `<p class="m">New: ${cnt.new || 0} &middot; Ready: ${cnt.ready || 0} &middot; Thin: ${cnt.thin || 0} &middot; Drafted: ${cnt.drafted || 0} &middot; Duplicate: ${cnt.duplicate || 0} &middot; Rejected: ${cnt.rejected || 0}</p>`;
     const hint = (cnt.ready || 0) > 0
       ? `<p class="note">${cnt.ready} ready topic hain${staleReady ? ` (${staleReady} ke sources purane hain - "Draft likho" dabane par pehle apne aap fresh sources aayenge)` : ''}. Neeche "Ready topic se ek draft likho" dabao, ya kisi topic ko kholkar "Approve: iska article likho" dabao.</p>`
       : '';
-    return A('Topics', `<p><a href="/admin/business">← Business page</a> | <a href="/admin">Admin</a> | <a href="/admin/autoheal">Auto-heal</a></p><h1>Trending topics</h1>${msg ? `<p class="note">${esc(msg)}</p>` : ''}${counts}${hint}<form method="post" action="/admin/topics/run"><button>Abhi trends + research chalao</button></form><form method="post" action="/admin/topics/research"><button class="g">Agla pending topic research karo (1 click = 1 result)</button></form><form method="post" action="/admin/card"><button class="g">Card banao (0 token, turant)</button></form><form method="post" action="/admin/write"><button class="g">Ready topic se ek draft likho (1-2 min lagenge, page band mat karna)</button></form>${results.map((r) => `<div class="card"><div class="p"><a href="/admin/topic/${r.id}"><b>${esc(r.query)}</b></a><div class="m"><span class="tag">${esc(r.status)}</span>${rowTag(r)} sources: ${r.source_count} &middot; ${esc(r.traffic)}</div></div></div>`).join('') || '<p>Abhi koi topic nahi. Upar ka button dabao.</p>'}`);
+    return A('Topics', `<p><a href="/admin/business">← Business page</a> | <a href="/admin">Admin</a> | <a href="/admin/autoheal">Auto-heal</a></p><h1>Trending topics</h1>${msg ? `<p class="note">${esc(msg)}</p>` : ''}${counts}${hint}<form method="post" action="/admin/topics/run"><button>Abhi trends + research chalao</button></form><form method="post" action="/admin/topics/research"><button class="g">Agla pending topic research karo (1 click = 1 result)</button></form><form method="post" action="/admin/card"><button class="g">Card banao (0 token, turant)</button></form><form method="post" action="/admin/write"><button class="g">Ready topic se ek draft likho (1-2 min lagenge, page band mat karna)</button></form>${results.map((r) => `<div class="card"><div class="p"><a href="/admin/topic/${r.id}"><b>${esc(r.query)}</b></a><div class="m"><span class="tag">${esc(r.status)}</span>${rowTag(r)} sources: ${r.source_count} &middot; ${esc(r.traffic)}${kindOf(r) ? ` &middot; kind: ${esc(kindOf(r))}` : ''}</div></div></div>`).join('') || '<p>Abhi koi topic nahi. Upar ka button dabao.</p>'}`);
   }
   const tm = p.match(/^\/admin\/topic\/(\d+)$/);
   if (tm) {
@@ -796,12 +907,12 @@ ${msg ? `<p class="note">${esc(msg)}</p>` : ''}
       pv = `<div class="card"><div class="p"><b>Image preview (0 token)</b><img src="${esc(svgToDataUrl(generateSVGThumbnail(r.query, pvCat, env.SITE_URL)))}" alt="preview" style="width:100%;max-width:420px;border-radius:10px;margin:8px 0"><p class="m">Ye turant bana preview hai. Draft banne par final image AI/stock se aayegi; agar wo fail ho jaye to yahi image publish hogi.</p><p class="m">Video: <a href="https://www.youtube.com/results?search_query=${encodeURIComponent(r.query)}" target="_blank" rel="noopener">YouTube par dekho (0 token)</a>. Site par video lagane ke liye <code>YOUTUBE_API_KEY</code> secret chahiye (free).</p></div></div>`;
     } catch {}
     const pre = b
-      ? `<div class="card"><div class="p"><b>Pre-read (0 token)</b> <span class="tag">${b.ok ? 'usable' : 'NOT usable'}</span><p class="m">Language ${esc(b.lang)}${b.mixed ? ' + fallback' : ''} &middot; quality ${b.quality}/100 &middot; ${bst.usable || 0} usable source(s) &middot; ${bst.fullText || 0} with full article text &middot; ${bst.facts || 0} facts (${bst.agreed || 0} agreed) &middot; newest source ${bst.newestAgeHours == null ? 'unknown' : bst.newestAgeHours + 'h old'}</p>${b.reason ? `<p class="note">Rukne ki wajah: ${esc(b.reason)}</p>` : ''}${factsHtml ? `<p class="m"><b>Facts read from sources:</b></p><ul>${factsHtml}</ul>` : ''}${(b.gaps || []).length ? `<p class="note">Missing / do not invent: ${esc((b.gaps || []).join('; '))}</p>` : ''}${droppedHtml ? `<details><summary>Hate hue sources (${(b.dropped || []).length})</summary><ul>${droppedHtml}</ul></details>` : ''}${b.briefText ? `<details><summary>Poora reading brief</summary><pre style="white-space:pre-wrap;font-size:12px">${esc(b.briefText)}</pre></details>` : ''}</div></div>`
+      ? `<div class="card"><div class="p"><b>Pre-read (0 token)</b> <span class="tag">${b.ok ? 'usable' : 'NOT usable'}</span><p class="m">Language ${esc(b.lang)}${b.mixed ? ' + fallback' : ''} &middot; quality ${b.quality}/100 &middot; ${bst.usable || 0} usable source(s) &middot; ${bst.fullText || 0} with full article text &middot; ${bst.facts || 0} facts (${bst.agreed || 0} agreed) &middot; newest source ${bst.newestAgeHours == null ? 'unknown' : bst.newestAgeHours + 'h old'}${d.kind ? ` &middot; kind: ${esc(d.kind)}` : ''}${bst.trustScore != null ? ` &middot; source trust ${bst.trustScore}/100 (${esc(bst.trustLevel || '')})` : ''}</p>${b.reason ? `<p class="note">Rukne ki wajah: ${esc(b.reason)}</p>` : ''}${factsHtml ? `<p class="m"><b>Facts read from sources:</b></p><ul>${factsHtml}</ul>` : ''}${(b.gaps || []).length ? `<p class="note">Missing / do not invent: ${esc((b.gaps || []).join('; '))}</p>` : ''}${droppedHtml ? `<details><summary>Hate hue sources (${(b.dropped || []).length})</summary><ul>${droppedHtml}</ul></details>` : ''}${b.briefText ? `<details><summary>Poora reading brief</summary><pre style="white-space:pre-wrap;font-size:12px">${esc(b.briefText)}</pre></details>` : ''}</div></div>`
       : '<p class="m">Pre-read abhi nahi bana. Neeche "Research dobara chalao" dabao; sources padhne ke baad yahan brief dikhega.</p>';
     const dr = d.debate || null;
     const dl = (dr && dr.ledger) || null;
     const claimLi = (arr, mark) => (arr || []).slice(0, 10).map((x) => `<li>${mark} ${esc(x.c || x.claim || '')} <span class="m">${esc((x.outlets || []).join(', ') || 'no outlet')}</span></li>`).join('');
-    const debateHtml = !dr ? '' : `<div class="card"><div class="p"><b>Multi-AI debate (safe: Reporter / Analyst / Skeptic)</b> <span class="tag">${dr.ok ? 'checked' : 'fail'}</span><p class="m">${(dr.stats && dr.stats.verified) || 0} verified &middot; ${(dr.stats && dr.stats.singleSource) || 0} single-source &middot; ${(dr.stats && dr.stats.unsupported) || 0} unsupported &middot; ${(Math.round((dr.ms || 0) / 100) / 10)}s${dr.at ? ' &middot; ' + new Date((dr.at + 19800) * 1000).toISOString().replace('T', ' ').slice(0, 16) + ' IST' : ''}</p><p class="m">Roles: ${(dr.roles || []).map((x) => `${esc(x.name)} ${x.ok ? 'OK' : 'fail'} (${esc(x.provider || '-')}, ${x.claims || 0} claims)`).join(' &middot; ')}</p>${dl && (dl.verified || []).length ? `<p class="m"><b>Verified claims (2+ outlets):</b></p><ul>${claimLi(dl.verified, '&#10003;')}</ul>` : ''}${dl && (dl.singleSource || []).length ? `<details><summary>Single-source claims (${dl.singleSource.length}) - article me "ek report ke mutabik" hi likha jayega</summary><ul>${claimLi(dl.singleSource, '&#9888;')}</ul></details>` : ''}${dl && (dl.unsupported || []).length ? `<details><summary>Evidence nahi mila (${dl.unsupported.length}) - writer ko nahi diya jayega</summary><ul>${claimLi(dl.unsupported, '&#10007;')}</ul></details>` : ''}${(dr.errors || []).length ? `<p class="note">${esc((dr.errors || []).join(' | ').slice(0, 300))}</p>` : ''}</div></div>`;
+    const debateHtml = !dr ? '' : `<div class="card"><div class="p"><b>Multi-AI debate (safe: neutral analyst roles, no real politicians)</b> <span class="tag">${dr.ok ? 'checked' : 'fail'}</span><p class="m">${(dr.stats && dr.stats.verified) || 0} verified &middot; ${(dr.stats && dr.stats.singleSource) || 0} single-source &middot; ${(dr.stats && dr.stats.unsupported) || 0} unsupported &middot; ${(Math.round((dr.ms || 0) / 100) / 10)}s${dr.at ? ' &middot; ' + new Date((dr.at + 19800) * 1000).toISOString().replace('T', ' ').slice(0, 16) + ' IST' : ''}</p><p class="m">Roles: ${(dr.roles || []).map((x) => `${esc(x.name)} ${x.ok ? 'OK' : 'fail'} (${esc(x.provider || '-')}, ${x.claims || 0} claims)`).join(' &middot; ')}</p>${dl && (dl.verified || []).length ? `<p class="m"><b>Verified claims (2+ outlets):</b></p><ul>${claimLi(dl.verified, '&#10003;')}</ul>` : ''}${dl && (dl.singleSource || []).length ? `<details><summary>Single-source claims (${dl.singleSource.length}) - article me "ek report ke mutabik" hi likha jayega</summary><ul>${claimLi(dl.singleSource, '&#9888;')}</ul></details>` : ''}${dl && (dl.unsupported || []).length ? `<details><summary>Evidence nahi mila (${dl.unsupported.length}) - writer ko nahi diya jayega</summary><ul>${claimLi(dl.unsupported, '&#10007;')}</ul></details>` : ''}${(dr.errors || []).length ? `<p class="note">${esc((dr.errors || []).join(' | ').slice(0, 300))}</p>` : ''}</div></div>`;
     const bizTopic = d.mode === 'business' || r.traffic === 'business' || isBusinessMode(env);
     const writeBtns = bizTopic
       ? `<form method="post" action="/admin/topic/${r.id}/write" style="display:inline"><input type="hidden" name="lang" value="en"><button class="g">Write English business draft</button></form><form method="post" action="/admin/topic/${r.id}/write" style="display:inline"><input type="hidden" name="lang" value="hi"><button class="g">Write Hindi business draft</button></form>`
@@ -818,7 +929,7 @@ ${msg ? `<p class="note">${esc(msg)}</p>` : ''}
     try {
       const r = await deepenOne(env, pid);
       const msg = r.ok
-        ? `Deepen ho gaya: ${r.fromWords} → ${r.words} shabd, score ${r.score}, depth ${r.gate ? r.gate.score : '-'}/100${r.verified ? ', fact-check verified' : ', fact-check manually dekho'}. Dobara padhkar approve karo.`
+        ? `Deepen ho gaya: ${numText(r.fromWords)} → ${numText(r.words)} shabd, score ${r.score}, depth ${r.gate ? r.gate.score : '-'}/100${r.verified ? ', fact-check verified' : ', fact-check manually dekho'}. Dobara padhkar approve karo.`
         : `Deepen fail: ${r.reason}`;
       return go('/admin/post/' + pid + '?msg=' + encodeURIComponent(msg));
     } catch (e) {
@@ -988,5 +1099,5 @@ ${approveBtns}${btn('reject', 'Reject', 'r')}${btn('to_draft', 'Back to draft', 
   const lwHtml = lw ? `<p class="note">Aakhri auto-draft koshish (${new Date((lw.at + 19800) * 1000).toISOString().replace('T', ' ').slice(0, 16)} IST): ${esc(lw.msg)}</p>` : '<p class="m">Auto-draft ne abhi tak koi koshish record nahi ki.</p>';
   const sw = (k, on, label) => `<form method="post" action="/admin/setting"><input type="hidden" name="k" value="${k}"><input type="hidden" name="v" value="${on ? 0 : 1}"><button class="${on ? 'g' : 'o'}">${label}: ${on ? 'ON (band karne ke liye dabao)' : 'OFF (chalu karne ke liye dabao)'}</button></form>`;
   const panel = `<div class="card"><div class="p"><b>Switches</b>${sw('auto_write', aw, 'Auto-draft (har ghante AI khud draft likhe)')}${sw('auto_publish', ap, 'AI auto-publish (draft khud live kare)')}${lwHtml}<p class="m">Auto-draft ON = cron har ghante try karega, par ek din me max <b>${esc(env.BUSINESS_DAILY_LIMIT || env.DAILY_POST_LIMIT || 3)}</b> draft banenge aur approval queue <b>${esc(env.AUTO_DRAFT_QUEUE_MAX || 6)}</b> drafts par ruk jayegi. Jo draft business gate ya score ${esc(env.AUTO_DRAFT_MIN_SCORE || 60)} se neeche hai wo auto-reject ho jayega, taaki tumhe sirf acche drafts dikhein. Auto-draft OFF ho to draft sirf tab banega jab tum Topics page par green button dabaoge. Auto-publish ON ho to score ${esc(env.AUTO_APPROVE_MIN_SCORE || 95)} ya zyada wale drafts, ${esc(env.AUTO_APPROVE_HOURS || 0)} ghante tak tumne kuch na kiya to, khud live ho jayenge. Note: auto-publish sirf tab hoga jab check_json me verified true ho (analysis + har claim ka sabut pass) aur SCORE_MAX ki limit cross ho. Default SCORE_MAX 94 hai, isliye auto-publish practically OFF hai - ye AdSense safety ke liye jaan-boojh kar hai. Dono OFF = har post tum khud approve karoge.</p></div></div>`;
-  return A('Admin', `<p><a href="/admin/new">+ New test draft</a> | <a href="/admin/business">Business</a> | <a href="/admin/topics">Topics</a> | <a href="/admin/autoheal">Auto-heal</a> | <a href="/admin/ai-test">AI test</a> | <a href="/admin/api-status">API status</a> | <a href="/" target="_blank">Site</a> | <a href="/admin/logout">Logout</a></p>${panel}${rows || '<p>Koi post nahi.</p>'}`, 200, false);
+  return A('Admin', `<p><a href="/admin/new">+ New test draft</a> | <a href="/admin/business">Business</a> | <a href="/admin/topics">Topics</a> | <a href="/admin/autoheal">Auto-heal</a> | <a href="/admin/adsense">AdSense</a> | <a href="/admin/subscribers">Subscribers</a> | <a href="/admin/ai-test">AI test</a> | <a href="/admin/api-status">API status</a> | <a href="/" target="_blank">Site</a> | <a href="/admin/logout">Logout</a></p>${panel}${rows || '<p>Koi post nahi.</p>'}`, 200, false);
 }

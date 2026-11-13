@@ -66,6 +66,51 @@ class ApiError extends Error {
   }
 }
 
+// Providers reject (or silently mis-handle) blank messages, two messages with the same role in a row,
+// and conversations that start with an assistant turn. Normalise once, in one place:
+//  * trim + drop empty content
+//  * merge consecutive messages with the same role
+//  * map unknown roles to "user"
+const TEXT_ROLES = new Set(['system', 'assistant', 'user']);
+export function normalizeMessages(messages) {
+  const out = [];
+  for (const m of Array.isArray(messages) ? messages : []) {
+    const role = TEXT_ROLES.has(m && m.role) ? m.role : 'user';
+    const content = String((m && m.content) ?? '').trim();
+    if (!content) continue;
+    const last = out[out.length - 1];
+    if (last && last.role === role) last.content += '\n\n' + content;
+    else out.push({ role, content });
+  }
+  return out;
+}
+
+// Gemini: system prompt goes in systemInstruction, contents must start with a user turn and
+// alternate user/model. "assistant" is called "model" there.
+export function geminiContents(messages) {
+  const msgs = normalizeMessages(messages);
+  const system = msgs.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n');
+  const contents = [];
+  for (const m of msgs.filter((m) => m.role !== 'system')) {
+    const role = m.role === 'assistant' ? 'model' : 'user';
+    const last = contents[contents.length - 1];
+    if (last && last.role === role) last.parts[0].text += '\n\n' + m.content;
+    else contents.push({ role, parts: [{ text: m.content }] });
+  }
+  if (contents.length && contents[0].role !== 'user') contents.unshift({ role: 'user', parts: [{ text: 'Continue.' }] });
+  return { system, contents };
+}
+
+// Cohere v2: one system message may come first, the chat must start and end with a user turn.
+export function cohereMessages(messages) {
+  const msgs = normalizeMessages(messages);
+  const system = msgs.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n');
+  const chat = msgs.filter((m) => m.role !== 'system').map((m) => ({ role: m.role, content: m.content }));
+  if (chat.length && chat[0].role !== 'user') chat.unshift({ role: 'user', content: 'Continue.' });
+  if (chat.length && chat[chat.length - 1].role !== 'user') chat.push({ role: 'user', content: 'Continue.' });
+  return system ? [{ role: 'system', content: system }, ...chat] : chat;
+}
+
 // One write at a time inside an isolate -> the usage counter does not lose counts when calls overlap.
 let writeChain = Promise.resolve();
 const serialize = (fn) => {
@@ -236,10 +281,8 @@ export class MultiAPIManager {
   async callGemini(messages, options = {}) {
     const config = configFor(this.env, 'gemini');
     const headers = { 'x-goog-api-key': this.apiKeys.gemini };
-    const system = messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n');
-    const contents = messages
-      .filter((m) => m.role !== 'system')
-      .map((m) => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: String(m.content) }] }));
+    const { system, contents } = geminiContents(messages);
+    if (!contents.length) throw new ApiError('no usable messages after normalization', 400);
     return this._tryModels('gemini', options, async (model) => {
       const body = {
         contents,
@@ -270,7 +313,8 @@ export class MultiAPIManager {
   async callCohere(messages, options = {}) {
     const config = configFor(this.env, 'cohere');
     const headers = { Authorization: `Bearer ${this.apiKeys.cohere}` };
-    const msgs = messages.map((m) => ({ role: m.role, content: String(m.content) }));
+    const msgs = cohereMessages(messages);
+    if (!msgs.some((m) => m.role !== 'system')) throw new ApiError('no usable messages after normalization', 400);
     return this._tryModels('cohere', options, async (model) => {
       const data = await this._post(config.endpoint, headers, {
         model, messages: msgs, temperature: this._temp(options), max_tokens: this._max(options)
@@ -292,6 +336,8 @@ export class MultiAPIManager {
   // options.exclude   = ['cohere']       -> skip listed providers.
   async generate(messages, options = {}) {
     const errors = [];
+    const clean = normalizeMessages(messages);
+    if (!clean.length) return { text: '', provider: null, model: null, tokens: 0, errors: ['all messages were empty or blank'] };
     const stats = await this.getUsageStats(); // one KV read for the whole round
     const callers = {
       groq: (m, o) => this.callGroq(m, o),
@@ -317,7 +363,7 @@ export class MultiAPIManager {
         continue;
       }
       try {
-        const result = await callers[provider](messages, options);
+        const result = await callers[provider](clean, options);
         await this.trackUsage(provider, result.tokens);
         return { text: result.text, provider: result.provider, model: result.model, tokens: result.tokens, errors };
       } catch (e) {

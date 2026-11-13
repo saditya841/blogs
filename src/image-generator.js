@@ -4,7 +4,7 @@
 // v3: the Pollinations hotlink is no longer used by default (it broke when their service was slow/rate-limited);
 //     the AI illustration now comes from the same code as media.js, so one article never gets two image systems.
 
-import { aiThumbnail, findPexels } from './media.js';
+import { aiThumbnail, findPexels, topicAmbiguous } from './media.js';
 
 const STYLES = {
   Politics: 'professional news photo, parliament, serious tone',
@@ -50,19 +50,33 @@ export class ImageGenerator {
   async generateFeaturedImage(title, category, postId) {
     const errors = [];
     const prompt = this.generateImagePrompt(title, category);
+    // Short/ambiguous titles ("DAC", a Hindi-only query) have no usable stock-search keywords.
+    // Searching a photo library for the category image gives a generic, misleading photo, so draw
+    // the AI illustration FIRST and only fall back to stock when the title is specific enough.
+    const ambiguous = topicAmbiguous(title, category);
+    const canAI = this.env.ENABLE_AI_IMAGES !== 'false' && this.env.AI;
 
-    const pexels = await this.generateWithPexels(title, category);
-    if (pexels.success) {
-      return { success: true, featuredImage: pexels.imageUrl, thumbnailImage: pexels.imageUrl, provider: 'pexels', credit: pexels.credit, prompt, errors };
-    }
-    if (this.env.PEXELS_API_KEY) errors.push(`Pexels: ${pexels.error}`);
-
-    // AI illustration: Workers AI draws the background and we store it in D1 -> a stable /img/<id>.jpg URL.
-    if (this.env.ENABLE_AI_IMAGES !== 'false' && this.env.AI) {
+    const tryPexels = async () => {
+      const pexels = await this.generateWithPexels(title, category);
+      if (pexels.success) return { success: true, featuredImage: pexels.imageUrl, thumbnailImage: pexels.imageUrl, provider: 'pexels', credit: pexels.credit, prompt, errors };
+      if (this.env.PEXELS_API_KEY) errors.push(`Pexels: ${pexels.error}`);
+      return null;
+    };
+    const tryAI = async () => {
+      if (!canAI) return null;
       const ai = await aiThumbnail(this.env, { query: title, category }).catch((e) => { errors.push(`Workers AI: ${String(e.message).slice(0, 80)}`); return null; });
-      if (ai && ai.url) {
-        return { success: true, featuredImage: ai.url, thumbnailImage: ai.url, provider: 'workers-ai', credit: ai.credit, prompt, errors };
-      }
+      return ai && ai.url ? { success: true, featuredImage: ai.url, thumbnailImage: ai.url, provider: 'workers-ai', credit: ai.credit, prompt, errors } : null;
+    };
+
+    if (!ambiguous) {
+      const p = await tryPexels();
+      if (p) return p;
+    }
+    const ai = await tryAI();
+    if (ai) return ai;
+    if (ambiguous) {
+      const p = await tryPexels();
+      if (p) return p;
     }
 
     if (this.env.DEFAULT_IMAGE_URL) {

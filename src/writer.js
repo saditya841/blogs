@@ -73,6 +73,22 @@ export function parseDraft(text) {
 
 const countWords = (s) => String(s || '').split(/\s+/).filter(Boolean).length;
 
+// Which of the 2-4 draft attempts should win. Pure function so the ranking is unit-tested:
+// completeness first, then business depth, then originality/grounding. The old flow kept the last
+// answer; a later attempt could be worse. Copy/number penalties make a clean shorter draft beat a
+// longer copied one.
+export function rankDraftAttempt({ draft = null, metrics = {}, gate = null, minWords = 1200, business = false } = {}) {
+  if (!draft || !draft.title) return -1e9;
+  const words = Number(metrics.words) || 0;
+  const usable = words >= (business ? Math.round(minWords * 0.6) : 150);
+  const wordsOk = words >= minWords ? 60 : words >= Math.round(minWords * 0.8) ? 30 : 0;
+  const gateScore = business && gate ? Number(gate.score) || 0 : 0;
+  return (usable ? 1000 : 0) + gateScore * 2 + wordsOk
+    - Math.round((Number(metrics.overlap) || 0) * 300)
+    - (Number(metrics.longest) || 0) * 2
+    - ((metrics.ungrounded || []).length) * 8;
+}
+
 // Readable slug; Hindi (Devanagari) titles are kept instead of turning into "post-xxxxx". Random suffix keeps it unique.
 export function slugify(text) {
   const base = String(text || '').toLowerCase().normalize('NFC').replace(/[^\p{L}\p{M}\p{N}]+/gu, '-').replace(/^-|-$/g, '').slice(0, 70) || 'post';
@@ -186,7 +202,13 @@ export async function writeOne(env, opts = {}) {
   // Business mode has its own, smaller cap: 3 deep articles/day is better than 10 thin ones.
   const bizEnv = isBusinessMode(env, null, {});
   const limit = Number((bizEnv ? env.BUSINESS_DAILY_LIMIT : env.DAILY_POST_LIMIT) || 4);
-  const made = (await env.DB.prepare('SELECT COUNT(*) c FROM posts WHERE created_at>=?').bind(dayStartIST()).first()).c;
+  // Only Business posts count against the Business cap. Earlier every post created today counted,
+  // so a news draft or a manual test post could silently exhaust the 3-per-day business limit.
+  const made = (await env.DB.prepare(
+    bizEnv
+      ? "SELECT COUNT(*) c FROM posts WHERE created_at>=? AND category='Business'"
+      : "SELECT COUNT(*) c FROM posts WHERE created_at>=? AND (category IS NULL OR category!='Business')"
+  ).bind(dayStartIST()).first()).c;
   if (made >= limit) return { ok: false, reason: `Aaj ki limit (${limit}) poori`, spent: false };
 
   // ---- 2. pick a ready topic that passes preflight and has real source text ----
@@ -338,23 +360,37 @@ export async function writeOne(env, opts = {}) {
     return items.length ? `Business quality gate: ${items.join(' | ')}` : '';
   };
 
+  const maxAttempts = Math.max(2, Math.min(4, Number(env.DRAFT_MAX_ATTEMPTS || 3)));
+  const attemptRank = (a) => rankDraftAttempt({ draft: a && a.draft, metrics: (a && a.m) || {}, gate: gateOf(a), minWords, business });
+  const retryFeedback = (a) => {
+    const parts = [];
+    if (!usable(a)) parts.push(`Pichhla jawab adhura tha. Poora format follow karo: TITLE, SUMMARY, CATEGORY, TAGS, BODY (${minWords}+ shabd).`);
+    if (a.m && (a.m.overlap > RETRY_OVERLAP || a.m.longest >= RETRY_RUN)) {
+      parts.push(`Sources se ${Math.round(a.m.overlap * 100)}% copy ho raha hai (sabse lambi line ${a.m.longest} shabd). Har vaakya naye shabdon me likho; headings bhi apne shabdon me.`);
+    }
+    const ug = (a.m && a.m.ungrounded) || [];
+    if (ug.length) parts.push(`Ye numbers sources me nahi hain: ${ug.slice(0, 5).join(', ')}. Inhe hatao ya sirf sourced number likho.`);
+    if (business) {
+      const g = gateOf(a);
+      if (g && !g.ok) parts.push(gateFeedback(g));
+    }
+    return parts.join(' ') || 'Draft ko aur specific aur sourced banao.';
+  };
+  const needsRetry = (a) => !usable(a) || a.m.overlap > RETRY_OVERLAP || a.m.longest >= RETRY_RUN || (business && gateOf(a) && !gateOf(a).ok);
+
   let best = await attempt('');
   if (!best.ai.text) {
     return { ok: false, reason: `AI draft nahi bana: ${(best.ai.errors || []).join(' | ').slice(0, 300) || 'koi jawab nahi'}`, spent: true };
   }
-  const needsRetry = (a) => !usable(a) || a.m.overlap > RETRY_OVERLAP || a.m.longest >= RETRY_RUN || (business && gateOf(a) && !gateOf(a).ok);
-  if (needsRetry(best)) {
-    const g = gateOf(best);
-    const why = !usable(best)
-      ? `Pichhla jawab adhura tha. Poora format follow karo: TITLE, SUMMARY, CATEGORY, TAGS, BODY (${minWords}+ shabd).`
-      : business
-        ? `Pichhla draft business quality gate pass nahi hua. ${gateFeedback(g)}. Poora naye shabdon me dobara likho, sirf tathya wahi rakho, aur saare required sections add karo.`
-        : `Pichhla draft sources se ${Math.round(best.m.overlap * 100)}% milta tha (sabse lambi copied line ${best.m.longest} shabd). Poora naye shabdon aur alag vakya-rachna me dobara likho, sirf tathya wahi rakho.`;
-    const second = await attempt(why);
-    if (second.ai.text && usable(second) && (!usable(best) || second.m.overlap < best.m.overlap || (business && (gateOf(second)?.score || 0) > (gateOf(best)?.score || 0)))) best = second;
+  // Up to 3 attempts by default (env DRAFT_MAX_ATTEMPTS, 2-4). The old flow gave up after one retry,
+  // which is why overlap/source errors failed a large share of clicks. The best attempt wins.
+  for (let i = 1; i < maxAttempts && needsRetry(best); i++) {
+    const next = await attempt(retryFeedback(best));
+    if (!next.ai.text || !next.draft) continue;
+    if (attemptRank(next) > attemptRank(best)) best = next;
   }
   if (!usable(best)) {
-    return { ok: false, reason: 'AI ka draft adhura aaya (title ya 150+ shabd nahi). Dobara try karo.', spent: true };
+    return { ok: false, reason: `AI ka draft adhura aaya (${maxAttempts} koshishon ke baad title ya ${business ? Math.round(minWords * 0.6) : 150}+ shabd nahi). Dobara try karo.`, spent: true };
   }
   if (best.m.overlap > MAX_OVERLAP || best.m.longest >= MAX_RUN) {
     return reject(env, topic, research, `Copy overlap ${Math.round(best.m.overlap * 100)}% zyada; ${best.m.longest} shabd ki line sources se mil rahi`);

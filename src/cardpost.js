@@ -125,6 +125,17 @@ h1 span{background:#ffd60a;color:#111;padding:0 8px;border-radius:7px;-webkit-bo
 .mini div{position:relative;padding:10px}.mini i{font-style:normal;background:#e5173f;font-size:11px;font-weight:800;padding:2px 9px;border-radius:99px}.mini h2{margin:6px 0 0;font-size:16px;line-height:1.35}
 @media (max-width:420px){h1{font-size:27px}.pt{font-size:16px}}`;
 
+// A card is a short page, so Google should only index the ones with real substance.
+// Auto rule: 3+ points + a real https image + at least one named source. CARD_INDEX=1 / 0 overrides it.
+export function cardIndexable(env = {}, post = {}) {
+  const force = String(env.CARD_INDEX ?? '').trim();
+  if (force === '1') return true;
+  if (force === '0') return false;
+  const points = Array.isArray(post.points) ? post.points.filter((p) => String(p || '').trim()) : [];
+  const outlets = Array.isArray(post.outlets) ? post.outlets.filter((o) => String(o || '').trim()) : [];
+  return points.length >= 3 && /^https:\/\//.test(post.image_url || '') && outlets.length >= 1;
+}
+
 const bg = (u) => (/^https:\/\//.test(u || '') ? ` style="background-image:url(&#39;${esc(u)}&#39;)"` : '');
 const hookHtml = (hook) => {
   const w = String(hook || '').split(/\s+/).filter(Boolean);
@@ -137,12 +148,26 @@ export function renderCardPage(env, topic, post) {
   const id = topic && topic.id;
   const hasImg = /^https:\/\//.test(post.image_url || '');
   const url = `${site}/card/${id}`;
-  const desc = esc((post.points || [])[0] || post.hook);
-  const robots = env.CARD_INDEX === '1' ? 'index,follow' : 'noindex,follow';
+  const descRaw = String((post.points || [])[0] || post.hook || '').replace(/\s+/g, ' ').trim().slice(0, 200);
+  const desc = esc(descRaw);
+  const robots = cardIndexable(env, post) ? 'index,follow' : 'noindex,follow';
   const pts = (post.points || []).map((p, i) => `<div class="pt"><b>${i + 1}</b><span>${esc(p)}</span></div>`).join('');
+  const published = new Date((Number(post.published_at) || now()) * 1000).toISOString();
+  const ld = {
+    '@context': 'https://schema.org', '@type': 'NewsArticle',
+    headline: String(post.hook || '').slice(0, 110),
+    description: descRaw,
+    mainEntityOfPage: { '@type': 'WebPage', '@id': url },
+    datePublished: published, dateModified: published,
+    articleSection: post.label || post.category || undefined,
+    ...(hasImg ? { image: [post.image_url] } : {}),
+    publisher: { '@type': 'Organization', name: env.SITE_NAME || 'Virall', url: site },
+    isAccessibleForFree: true
+  };
   return `<!doctype html><html lang="hi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${esc(post.hook)} | ${name}</title><meta name="description" content="${desc}"><meta name="robots" content="${robots}"><link rel="canonical" href="${esc(url)}">
 <meta property="og:type" content="article"><meta property="og:title" content="${esc(post.hook)}"><meta property="og:description" content="${desc}"><meta property="og:url" content="${esc(url)}">${hasImg ? `<meta property="og:image" content="${esc(post.image_url)}"><meta name="twitter:card" content="summary_large_image">` : ''}
+<script type="application/ld+json">${JSON.stringify(ld).replace(/</g, '\\u003c')}</script>
 <style>${CSS}</style></head><body><div class="wrap">
 <div class="top"><a href="/">${name}</a><a href="/cards">सभी कार्ड →</a></div>
 <div class="card${hasImg ? '' : ' nopic'}"${hasImg ? bg(post.image_url) : ''}><div class="in">
