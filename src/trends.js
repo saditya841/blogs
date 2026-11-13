@@ -188,10 +188,15 @@ export async function collectTopics(env) {
 export async function collectBusinessTopics(env, opts = {}) {
   const limit = Math.max(1, Math.min(10, Number(opts.limit || env.BUSINESS_TOPIC_LIMIT || 3)));
   const since = now() - 86400;
-  const have = (await env.DB.prepare("SELECT COUNT(*) c FROM topics WHERE created_at>? AND status IN ('new','ready','thin')").bind(since).first()).c;
+  // 'thin' topics failed research, so they must not eat the daily quota. Counting them was the
+  // "aaj ki topic limit poori" false alarm: 3 dead thin topics blocked collection for the whole day.
+  const have = (await env.DB.prepare("SELECT COUNT(*) c FROM topics WHERE created_at>? AND status IN ('new','ready')").bind(since).first()).c;
+  // A writing buffer is useful; 50 pending topics are not. Stop collecting while ready topics wait.
+  const readyMax = Math.max(3, Number(env.TOPIC_READY_MAX || 12));
+  const ready = Number((await env.DB.prepare("SELECT COUNT(*) c FROM topics WHERE status='ready' AND (traffic='business' OR research LIKE '%\"mode\":\"business\"%')").first()).c) || 0;
   const daily = Math.max(1, Number(env.DAILY_TOPIC_LIMIT || 10));
-  const room = Math.max(0, Math.min(limit, daily - have));
-  if (!room) return { added: 0, room: 0, note: 'daily limit reached', errs: [] };
+  const room = Math.max(0, Math.min(limit, daily - have, readyMax - ready));
+  if (!room) return { added: 0, room: 0, ready, note: ready >= readyMax ? 'ready buffer full' : 'daily limit reached', errs: [] };
 
   let added = 0;
   const errs = [];
@@ -244,7 +249,7 @@ export async function collectBusinessTopics(env, opts = {}) {
     await insert(b.q, { mode: 'business', via: 'bank', kind: businessKind(b.q), angle: b.angle, framework: b.framework });
   }
 
-  return { added, room, errs };
+  return { added, room, ready, errs };
 }
 
 // Hard ceiling for one phase. A click must always end with a visible result; a slow provider

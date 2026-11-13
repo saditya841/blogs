@@ -70,7 +70,13 @@ export function validatePost(p, o = {}) {
 
   const c = o.check;
   if (c) {
-    if (c.verified !== true) E('not_verified', 'Fact-check pass nahi hua');
+    // A human can approve a post whose numbers could not all be matched against the source text
+    // (news snippets are short, so this happens a lot). Auto-publish stays strict; a manual
+    // approval just shows a warning, because the human-check form is the real gate.
+    if (c.verified !== true) {
+      if (o.strict) E('not_verified', 'Fact-check pass nahi hua');
+      else W('not_verified', 'Fact-check poora verify nahi hua (kuch numbers/names sources se exact match nahi hue) - khud padh kar confirm karo');
+    }
     if (c.coverageLow) E('coverage', 'Fact-check poora nahi hua (checker ne kam claims diye): post khud padhkar dekho');
     if ((c.unsupportedCount || 0) > 0) E('unsupported', `${c.unsupportedCount} claims ka sabut sources mein nahi`);
     if (c.newest_source && now - c.newest_source > fresh) E('stale', `Sabse nayi source ${Math.round((now - c.newest_source) / 86400)} din purani hai (allowed ${freshDays} din)`);

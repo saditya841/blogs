@@ -16,6 +16,7 @@ import { recheckSources } from './sourcecheck.js';
 import { autoDraftQueue, autoDraftKeep } from './autodraft.js';
 import { deepenOne, gapReport } from './deepen.js';
 import { cleanupPreview, cleanupTopics, fixPostBasics, healDrafts, recentAgentRuns } from './autoheal.js';
+import { pruneUnsupportedClaims, fitSummary } from './claimprune.js';
 
 const now = () => Math.floor(Date.now() / 1000);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -754,8 +755,18 @@ async function admin(req, env, p, url) {
   if (p === '/admin/business/collect' && req.method === 'POST') {
     try {
       const r = await collectBusinessTopics(env);
-      const msg = `Naye business topics: ${r.added}${r.room === 0 ? ' (aaj ki topic limit poori)' : ''}${r.errs && r.errs.length ? ' | ' + r.errs.join('; ') : ''}`;
-      return go('/admin/business?msg=' + encodeURIComponent(msg));
+      // A 0-token click must never dead-end with "limit poori". If ready topics are already
+      // waiting, send the admin straight down to them; adding more topics does not help.
+      const ready = Number((await env.DB.prepare("SELECT COUNT(*) c FROM topics WHERE status='ready' AND (traffic='business' OR research LIKE '%\"mode\":\"business\"%')").first()).c) || 0;
+      const drafted = Number((await env.DB.prepare("SELECT COUNT(*) c FROM posts WHERE status='draft'").first()).c) || 0;
+      let msg;
+      if (r.added > 0) msg = `${r.added} naye business topics aa gaye. Neeche ready list se "Write" dabao.`;
+      else if (ready > 0) msg = `Naye topics ki zaroorat nahi — ${ready} ready topics already pending hain. Neeche ready list se "Write English" dabao (ek click = ek draft).`;
+      else if (r.room === 0) msg = 'Aaj ki topic limit poori (kal naye aayenge). Abhi koi ready topic nahi — Topics page se "Abhi trends + research chalao" dabao.';
+      else msg = 'Source se koi naya topic nahi mila. Dobara try karo ya Topics page se research chalao.';
+      if (drafted > 0) msg += ` | Review queue me ${drafted} draft pending hain.`;
+      if (r.errs && r.errs.length) msg += ' | ' + r.errs.join('; ');
+      return go('/admin/business?msg=' + encodeURIComponent(msg) + (r.added > 0 || ready > 0 ? '#ready' : ''));
     } catch (e) { return go('/admin/business?msg=' + encodeURIComponent('ERROR: ' + String(e.message).slice(0, 250))); }
   }
   if (p === '/admin/business/write' && req.method === 'POST') {
@@ -777,15 +788,22 @@ async function admin(req, env, p, url) {
     const cap = Number((isBusinessMode(env) ? env.BUSINESS_DAILY_LIMIT : env.DAILY_POST_LIMIT) || 3);
     const made = (await env.DB.prepare("SELECT COUNT(*) c FROM posts WHERE created_at>=? AND category='Business'").bind(dayStartIST()).first()).c;
     const lang = String(env.BUSINESS_LANG || 'en').toLowerCase() === 'hi' ? 'hi' : 'en';
-    const rows = results.map((r) => {
+    const rowHtml = (r) => {
       let d = {}; try { d = JSON.parse(r.research || '{}'); } catch {}
       const meta = [d.heat === 'high' ? 'HIGH TRAFFIC' : d.heat === 'fresh' ? 'fresh news' : '', d.kind ? `kind: ${d.kind}` : '', d.framework ? `framework: ${d.framework}` : '', d.angle ? `angle: ${d.angle}` : '', `sources: ${r.source_count || 0}`].filter(Boolean).join(' · ');
       const write = r.status === 'ready'
         ? `<form method="post" action="/admin/business/write" style="display:inline"><input type="hidden" name="topicId" value="${r.id}"><input type="hidden" name="lang" value="en"><button class="g">Write English</button></form>
            <form method="post" action="/admin/business/write" style="display:inline"><input type="hidden" name="topicId" value="${r.id}"><input type="hidden" name="lang" value="hi"><button class="g">Write Hindi</button></form>`
-        : `<span class="m">Pehle research karo (Topics page)</span>`;
+        : r.status === 'new'
+          ? `<form method="post" action="/admin/topics/research" style="display:inline"><button class="g">Research karo (0 token)</button></form> <span class="m">research ke baad Write button aayega</span>`
+          : `<span class="m">${r.status === 'thin' ? 'Sources kam mile the — Topics page se dobara research try karo.' : 'Is topic se koi draft nahi bana (already used/rejected).'}</span>`;
       return `<div class="card"><div class="p"><a href="/admin/topic/${r.id}"><b>${esc(r.query)}</b></a><div class="m"><span class="tag">${esc(r.status)}</span> ${esc(meta)}</div><div style="margin-top:6px">${write}</div></div></div>`;
-    }).join('');
+    };
+    // Ready topics go first: they need no new research, just one click. Anything else is noise
+    // until the ready buffer is empty.
+    const readyList = results.filter((r) => r.status === 'ready');
+    const readyRows = readyList.map(rowHtml).join('');
+    const otherRows = results.filter((r) => r.status !== 'ready').map(rowHtml).join('');
     const counts = Object.entries(cnt).map(([k, v]) => `${esc(k)}: ${v}`).join(' &middot; ') || 'koi business topic nahi';
     // Existing Business posts: find thin drafts and offer one-click "deepen" (fresh sources + example + result).
     const { results: bposts } = await env.DB.prepare("SELECT id,title,status,word_count,score,check_json,body,category FROM posts WHERE category='Business' ORDER BY id DESC LIMIT 30").all();
@@ -794,13 +812,20 @@ async function admin(req, env, p, url) {
     const gapBlock = `<h2>Content gap analysis (existing Business posts)</h2><p class="m">${bposts.length} Business posts check kiye, ${gaps.length} me detail ki kami mili. Sirf drafts yahan se deepen ho sakte hain; publish phir bhi human approval se hoga.</p>${gapRows || '<p class="m">Koi detail gap nahi mila — sab posts structure complete hain.</p>'}`;
     return A('Business', `<p><a href="/admin/topics">Topics</a> | <a href="/admin/autoheal">Auto-heal</a> | <a href="/admin">Admin</a></p><h1>Business content</h1>
 ${msg ? `<p class="note">${esc(msg)}</p>` : ''}
-<p class="m">Aaj ke drafts: ${made}/${cap} &middot; default language: ${lang} &middot; ${counts}</p>
+<p class="m">Aaj ke drafts: ${made}/${cap} &middot; <b>ready topics: ${readyList.length}</b> &middot; default language: ${lang} &middot; ${counts}</p>
+${readyList.length
+  ? `<p class="note"><b>Aapka agla kaam:</b> neeche ready list se ek topic par <b>"Write English"</b> dabao. Naye topics laane ki zaroorat nahi — ${readyList.length} already taiyar hain.</p>`
+  : `<p class="note"><b>Aapka agla kaam:</b> koi ready topic nahi hai. Pehle "Naye business topics lao" dabao, phir neeche "Research karo" dabao.</p>`}
 <p class="note">Business mode news se alag hai: research Wikipedia + news se hota hai, article me plain-language setup, framework, unit economics, worked example, counterpoint, operator playbook, result, risks aur "kya confirm nahi hai" section code se check hote hain. Stock tips aur guaranteed-return language hard-block hai. Publish se pehle human approval zaroori hai.</p>
+<details><summary class="m">Naye topics laana hai? (sirf tab jab ready list khali ho)</summary>
 <form method="post" action="/admin/business/collect"><button>Naye business topics lao (0 token)</button></form>
-<form method="post" action="/admin/business/write"><input type="hidden" name="lang" value="en"><button class="g">Ek English business draft likho (token, 2-3 min)</button></form>
-<form method="post" action="/admin/business/write"><input type="hidden" name="lang" value="hi"><button class="g">Ek Hindi business draft likho (token, 2-3 min)</button></form>
-<p class="m"><a href="/admin/topics">Topics page</a> par pending business topic ka research chalao, phir yahan "Write" dabao. Auto-draft OFF rakho jab tak quality trust na ho.</p>
-${rows || '<p>Abhi koi business topic nahi. Upar "Naye business topics lao" dabao.</p>'}
+</details>
+<form method="post" action="/admin/business/write"><input type="hidden" name="lang" value="en"><button class="g">Ready topic se ek English draft likho (token, 2-3 min)</button></form>
+<form method="post" action="/admin/business/write"><input type="hidden" name="lang" value="hi"><button class="g">Ready topic se ek Hindi draft likho (token, 2-3 min)</button></form>
+<h2 id="ready">Ready topics — seedha draft banao (${readyList.length})</h2>
+${readyRows || '<p class="m">Koi ready topic nahi. Upar wale "Naye business topics lao" se 3 naye aayenge, phir unhe research karo.</p>'}
+<h2>Baaki topics (research/used/thin)</h2>
+${otherRows || '<p class="m">Kuch nahi.</p>'}
 ${gapBlock}`);
   }
   // ---- Auto-heal agent: 0-token cleanup + metadata repair, opt-in draft deepening ----
@@ -1022,6 +1047,34 @@ ${msg ? `<p class="note">${esc(msg)}</p>` : ''}
         const n = await markPostFactsVerified(env, id);
         return go('/admin/post/' + id + '?msg=' + encodeURIComponent(n ? `${n} facts ka last_verified time update ho gaya.` : 'Koi linked fact nahi mila.'));
       }
+      if (a === 'quickfix') {
+        // 0-token repair: drop the sentences behind unsupported claims and trim the summary.
+        // This is the one click that used to be missing: every draft died on 1-2 unsupported
+        // lines, and there was no way to remove them without rewriting the whole article.
+        const pr = await env.DB.prepare('SELECT * FROM posts WHERE id=?').bind(id).first();
+        if (!pr) return go('/admin');
+        const ck = parseCheck(pr) || {};
+        const pruned = pruneUnsupportedClaims(pr.body || '', ck.claimList || []);
+        const summary = fitSummary(pr.summary || '');
+        const body = pruned.changed ? pruned.body : String(pr.body || '');
+        const nextCk = { ...ck };
+        if (pruned.changed) {
+          nextCk.prunedClaims = [...(ck.prunedClaims || []), ...pruned.removed].slice(-20);
+          nextCk.claimList = (ck.claimList || []).filter((c) => !(c && (c.ok === false || c.ok === 0)));
+          nextCk.supported = nextCk.claimList.length;
+          nextCk.unsupportedCount = pruned.unmatched.length;
+          nextCk.claims = Math.max(Number(ck.claims) || 0, nextCk.supported + pruned.unmatched.length);
+        }
+        await env.DB.prepare('UPDATE posts SET body=?,summary=?,word_count=?,check_json=?,updated_at=? WHERE id=?')
+          .bind(body, summary, words(body), JSON.stringify(nextCk), tt, id).run();
+        const bits = [];
+        if (pruned.removed.length) bits.push(`${pruned.removed.length} unsupported line hatayi`);
+        if (pruned.unmatched.length) bits.push(`${pruned.unmatched.length} claim body me match nahi hua`);
+        if (summary !== String(pr.summary || '')) bits.push(`summary ${String(pr.summary || '').length} se ${summary.length} akshar`);
+        return go('/admin/post/' + id + '?vm=' + encodeURIComponent(bits.length
+          ? `0-token fix ho gaya: ${bits.join(', ')}. Ab neeche "Publish se pehle jaanch" dobara dekho; green ho to Approve kar do.`
+          : 'Kuch fix karne ki zaroorat nahi mili (koi unsupported claim match nahi hua). Reject karke naya draft lo.'));
+      }
       if ((a === 'approve_now' || a === 'approve_random') && f.get('force') !== '1') {
         const pr = await env.DB.prepare('SELECT * FROM posts WHERE id=?').bind(id).first();
         if (humanEditRequired(env) && (!pr || !pr.human_edited_at)) {
@@ -1067,7 +1120,7 @@ ${msg ? `<p class="note">${esc(msg)}</p>` : ''}
       ? `<div class="note">${stale.length} fact 24 ghante se re-check nahi hue (official number badal sakta hai). Sources dobara padh kar confirm karo: <form method="post" action="${act}" style="display:inline"><input type="hidden" name="a" value="facts_ok"><button class="o" style="width:auto;padding:4px 10px">Facts aaj verify kiye</button></form><br><span class="m">${stale.slice(0, 3).map((f) => esc(f.text)).join(' | ')}</span></div>`
       : '';
     const bizHint = r.category === 'Business' && r.status === 'draft' && !vr.ok
-      ? '<p class="note">Ye draft publish-ready nahi hai. Upar <b>Content gap analysis → Deepen</b> chalao, ya <b>Reject</b> karke naya likho. Red force button se unsupported numbers live ho jayenge.</p>'
+      ? '<p class="note">Neeche ke &#10060; wale points approve block karte hain. Pehle <b>0-token auto-fix</b> dabao (unsupported line hatata hai + summary 160 akshar me laata hai); phir bhi red rahe to <b>Deepen</b> ya <b>Reject</b>. &#9888;&#65039; warnings sirf advisory hain.</p>'
       : '';
     const checkBlock = `<div class="card"><div class="p"><b>Publish se pehle jaanch</b>${vm ? `<p class="note">${esc(vm)}</p>` : ''}${bizHint}${li(vr.errors, '&#10060;', 'background:#fdecea;border-color:#f5c2c0')}${li(vr.warnings, '&#9888;&#65039;')}${vr.errors.length || vr.warnings.length ? '' : '<p class="m">Sab jaanch theek hain.</p>'}`
       + `${ck ? `<p class="m">Fact-check: ${ck.supported}/${ck.claims} claims ka sabut sources mein mila, ${ck.fixRounds || 0} baar sudhaara gaya, copy overlap ${((ck.overlap || 0) * 100).toFixed(0)}%${ck.numbersNotInSources && ck.numbersNotInSources.length ? ' | sankhya sources mein nahi: ' + esc(ck.numbersNotInSources.join(', ')) : ''}${ck.latinNotInSources && ck.latinNotInSources.length ? ' | English naam sources mein nahi: ' + esc(ck.latinNotInSources.join(', ')) : ''}</p>${trustHtml}${claimRows ? `<details><summary>Kya check hua (claim + sabut)</summary><ul>${claimRows}</ul></details>` : ''}` : '<p class="m">Is post ka fact-check record nahi hai.</p>'}${ck && (ck.style || ck.debate) ? `<p class="m">Style guard: ${ck.style ? `${ck.style.score}/100${ck.style.penalty ? ` (${ck.style.penalty} points kate: ${esc((ck.style.notes || []).slice(0, 3).join('; '))})` : ''}` : 'n/a'}${ck.debate ? ` | Multi-AI debate: ${(ck.debate.stats && ck.debate.stats.verified) || 0} verified, ${(ck.debate.stats && ck.debate.stats.conflict) || 0} conflict claims` : ''}</p>` : ''}${qHtml}${staleHtml}<details${unc.length ? ' open' : ''}><summary>Kya confirm nahi hai (${unc.length})</summary>${uncHtml}</details>${ck && ck.source_check ? `<p class="m">Last source check: ${ck.source_check.okCount}/${ck.source_check.checked} live${(ck.source_check.dead || []).length ? ' | dead: ' + esc((ck.source_check.dead || []).join(', ')) : ''}</p>` : ''}</div></div>`;
@@ -1083,7 +1136,10 @@ ${msg ? `<p class="note">${esc(msg)}</p>` : ''}
 <form method="post" action="${act}"><input type="hidden" name="a" value="add_correction"><input name="old_text" placeholder="Kya galat tha (purana text)"><input name="new_text" placeholder="Sahi text (naya)"><input name="reason" placeholder="Reason (10+ akshar, public dikhega)" required><button class="o">Correction + dated update line jodo</button></form></div></div>`;
     const btnF = (a, label, c = '') => `<form method="post" action="${act}"><input type="hidden" name="a" value="${a}"><input type="hidden" name="force" value="1"><button class="${c}">${label}</button></form>`;
     const approveBtns = vr.ok ? btn('approve_now', 'Approve + publish now (human check ke baad)', 'g') + btn('approve_random', 'Approve + publish at random time (within 1 hr)')
-      : '<p class="note">Upar ki &#10060; galtiyan theek hone tak Approve band hai.</p>' + btnF('approve_now', 'Phir bhi approve + publish karo (meri zimmedari)', 'r');
+      : '<p class="note">Upar ki &#10060; galtiyan theek hone tak Approve band hai.</p>'
+        + `<form method="post" action="${act}"><input type="hidden" name="a" value="quickfix"><button class="g">0-token auto-fix: unsupported line hatao + summary chhota karo</button></form>`
+        + '<p class="m">Ye button sirf wahi sentence hatata hai jiska sabut sources me nahi mila. Koi naya text nahi likhta, token 0 kharch hota hai.</p>'
+        + btnF('approve_now', 'Phir bhi approve + publish karo (meri zimmedari)', 'r');
     return A('Review', `<h1>${esc(r.title)}</h1><p><span class="tag">${esc(r.status)}</span> score: ${r.score ?? '-'} &middot; ${r.word_count || words(r.body)} words &middot; ${esc(r.category)}</p>${r.image_url ? (aiImg(r.image_url) ? thumb(r, true) : `<img src="${esc(r.image_url)}" style="max-width:100%">`) : ''}<p><i>${esc(r.summary)}</i></p>${renderBody(r.body).html}
 ${gapHtml}
 ${checkBlock}

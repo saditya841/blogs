@@ -14,6 +14,7 @@ import { factCheck } from './editor.js';
 import { collectSources } from './trends.js';
 import { businessGate, businessMeta, businessMessages, derivedNumbers } from './business.js';
 import { copyCheck, parseDraft, ungroundedNumbers } from './writer.js';
+import { repairAfterFactCheck } from './claimprune.js';
 import { saveFingerprint } from './similarity.js';
 import { trustMeta, trustSummary } from './sourcetrust.js';
 
@@ -118,6 +119,8 @@ export async function deepenOne(env, postId, opts = {}) {
     });
   }
   if (fc && fc.body) draft.body = fc.body;
+  // Same 0-token repair as the writer: unsupported lines out, summary <= 158 chars.
+  repairAfterFactCheck(fc, draft);
 
   const finalCc = copyCheck(draft.body, sourceTexts);
   if (finalCc.overlap > Number(env.COPY_MAX_OVERLAP || 0.3) || finalCc.longest >= Number(env.COPY_MAX_RUN || 35)) {

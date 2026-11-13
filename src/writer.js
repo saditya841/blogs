@@ -28,6 +28,7 @@ import { brandedImage } from './media.js';
 import { runDebate, debateBrief, debateMeta, ledgerTextFromMeta } from './debate.js';
 import { fingerprint, findDuplicate, loadExistingFingerprints, saveFingerprint } from './similarity.js';
 import { styleCheck, styleMeta } from './style.js';
+import { repairAfterFactCheck } from './claimprune.js';
 import { originality } from './originality.js';
 import { specificity, specificityMeta } from './specificity.js';
 import { loadVoiceProfile, voiceCheck, voiceMeta } from './voice.js';
@@ -428,6 +429,13 @@ export async function writeOne(env, opts = {}) {
     });
   }
   if (fc && fc.body) draft.body = fc.body;
+  // 0-token repair before saving: remove the sentences behind unsupported claims (a claim the
+  // sources do not support must not stay in the article as a fact) and trim the summary to 158
+  // characters. Without this, almost every draft blocked approval on 1-2 lines.
+  const repaired = repairAfterFactCheck(fc, draft);
+  if (repaired.removed.length) {
+    console.log(JSON.stringify({ claimPrune: { removed: repaired.removed.length, unmatched: repaired.unmatched.length } }));
+  }
 
   const finalCc = copyCheck(draft.body, sourceTexts);
   if (finalCc.overlap > MAX_OVERLAP || finalCc.longest >= MAX_RUN) {

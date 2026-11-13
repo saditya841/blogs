@@ -615,9 +615,14 @@ export function businessGate(article = {}, opts = {}) {
     hasRisks: RE.risks.test(body),
     hasHonesty: RE.honesty.test(body),
     hasIndia: RE.india.test(body),
-    hasExample: headings.some((h) => /^(worked example|example|illustration|उदाहरण|मिसाल)\b/i.test(h)),
-    hasResult: headings.some((h) => /^(what the result shows|result|outcome|नतीजा|परिणाम)\b/i.test(h)),
-    hasPlain: headings.some((h) => /plain language|simple language|आसान भाषा|सरल भाषा/i.test(h)) || /plain language/i.test(body),
+    // Heading checks are deliberately a little forgiving: the model writes "## The worked
+    // example" or "## What the result shows" as often as the exact prompt text. A section that
+    // exists but is named differently was being reported as missing (79/100 on almost every draft).
+    hasExample: headings.some((h) => /\b(worked example|examples?|illustration|case study|उदाहरण|मिसाल)\b/i.test(h)),
+    hasResult: headings.some((h) => /\b(result|results|outcome|what happened|aftermath|नतीजा|परिणाम)\b/i.test(h)),
+    hasPlain:
+      headings.some((h) => /plain language|simple language|simple words|आसान भाषा|सरल भाषा/i.test(h))
+      || /\b(plain language|in simple (words|terms)|simply put|आसान शब्दों में|सरल शब्दों में)\b/i.test(body),
     hasAnalysis: /^##\s*(?:analysis|विश्लेषण|bottom line|निचोड़)\s*$/im.test(body),
     guaranteeHits: [...new Set(full.match(new RegExp(RE.guarantee.source, 'gi')) || [])].slice(0, 5),
     stockTipHits: [...new Set(full.match(new RegExp(RE.stockTip.source, 'gi')) || [])].slice(0, 5),
