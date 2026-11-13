@@ -434,6 +434,20 @@ lekin `autodraft.js` do hard rails lagata hai:
 Isliye "har ghante" ka matlab 24 posts/day nahi — max `BUSINESS_DAILY_LIMIT` (3) quality drafts/day, aur
 review queue kabhi 6 se zyada nahi hoti. Auto-publish ON karne ki zaroorat nahi; human gate chalu rehta hai.
 
+### Publish repair (`claimprune.js`, 0 token)
+
+`validatePost` kisi bhi unsupported claim par approve block karta hai, aur 160+ akshar ki summary
+Google me kat jaati hai. Dono ko bina naye AI call ke theek kiya jata hai:
+
+- `pruneUnsupportedClaims(body, claimList)` — unsupported claim ke content words se sabse match
+  karne wala **ek** sentence hatata hai (heading, baaki sentences safe). Match na mile to claim
+  `unmatched` report hota hai — text jaan-boojh kar nahi hataate.
+- `fitSummary(summary, 158)` — sentence end par cut, warna word boundary par.
+- `repairAfterFactCheck(fc, draft)` — writer aur deepen dono me fact-check ke turant baad chalta hai,
+  `check_json` me `prunedClaims` + naya `unsupportedCount` likhta hai.
+- Review page par `a=quickfix` button wahi repair dobara chalata hai (purane drafts ke liye) aur
+  exact before/after dikhata hai.
+
 ### Card pages (SEO-safe short content)
 
 `cardpost.js::cardIndexable(env, post)` ek pure rule hai:
@@ -783,8 +797,8 @@ baaki tables `IF NOT EXISTS` hain.
 
 ## 16. Test coverage
 
-- `npm test` → **418 pass, 0 fail** (100 suites, 24 files)
-- `npm run check` → **34/34 modules load**
+- `npm test` → **430 pass, 0 fail** (104 suites, 25 files)
+- `npm run check` → **35/35 modules load**
 
 New tests: `claims`, `similarity`, `style`, `debate` (ledger, duplicate, human-style, safe roles,
 provider rotation, judge fallback, timeouts, no-source/less-roles failures), `quality-layers`

@@ -52,7 +52,7 @@ risky hai — isliye manual approve default hai.
 Zaroorat: **Node.js 22+** (Node 26 par test kiye gaye). `npm install` ki zaroorat nahi — koi dependency nahi hai.
 
 ```bash
-npm test          # 418 unit tests (network nahi, DB nahi)
+npm test          # 430 unit tests (network nahi, DB nahi)
 npm run check     # har src/*.js ko import karke syntax/import error pakadta hai
 npx wrangler dev  # local Worker (pehli baar Cloudflare login maangega)
 ```
@@ -275,6 +275,7 @@ Pehli baar deploy ke baad:
 8. **Traffic automation:** sitemap/news-sitemap/RSS/IndexNow/cards/newsletter sab automatic. **Content review human hi rahega** — ye AdSense safety ke liye design hai, kami nahi.
 9. **Gemini/Cohere:** blank/duplicate/out-of-order messages normalize hote hain (system prompt preserve, user turn se start/end). Unsplash dependency hai hi nahi — fallback Pexels → Wikimedia → AI → branded SVG hai.
 10. **AdSense:** `/admin/adsense` exact missing secrets + content checks + manual steps dikhata hai. Approval/indexing/traffic ki guarantee nahi di jati.
+11. **Publish repair (0 token):** `claimprune.js` sirf wahi sentence hatata hai jiska sabut sources me nahi mila (headings aur baaki text safe), aur summary 158 akshar me kaat deta hai. Writer aur Deepen me automatic; review page par "0-token auto-fix" button bhi hai jab approve block ho.
 
 ---
 
@@ -398,7 +399,7 @@ Safety rules jo code me already hain:
 npm test
 ```
 
-418 tests in 100 suites, 24 files (`preread`, `validate`, `writer`, `editor`, `playbook`, `verify`, `facts`, `cardpost`, `media`,
+430 tests in 104 suites, 25 files (`preread`, `validate`, `writer`, `editor`, `playbook`, `verify`, `facts`, `cardpost`, `claimprune`, `media`,
 `trends`, `ai`, `api-manager`, `seo-optimizer`, `index`, `claims`, `similarity`, `style`, `debate`, `quality-layers`, `business`, `sourcetrust`, `autodraft`, `deepen`, `autoheal`). Sab pure functions / fake KV / fake fetch -
 koi network call nahi, koi real DB nahi. `quality-layers` conflicts, originality, specificity, voice, fact
 registry, corrections aur source liveness ko cover karta hai (in-memory SQLite se, network nahi).
